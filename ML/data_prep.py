@@ -45,11 +45,12 @@ class RollingWindowSplitter:
     """
     Splits data into Train, Validation, and Test sets.
     """
-    def __init__(self, test_start_date, train_years, val_months, buffer_days):
+    def __init__(self, test_start_date, train_years, val_months, buffer_days, train_start_date=None):
         self.test_start_date = pd.to_datetime(test_start_date)
         self.train_years = train_years
         self.val_months = val_months
         self.buffer_days = buffer_days
+        self.train_start_date = pd.to_datetime(train_start_date) if train_start_date else None
         
     def get_split(self, df):
         """
@@ -84,7 +85,13 @@ class RollingWindowSplitter:
         # Train Set
         # End of Train = Val Start - Buffer
         train_end_date = val_start_date - pd.Timedelta(days=self.buffer_days)
-        train_start_date = train_end_date - pd.DateOffset(years=self.train_years)
+        
+        if self.train_start_date:
+            # Expanding Window (Fixed Start)
+            train_start_date = self.train_start_date
+        else:
+            # Rolling Window (Fixed Length)
+            train_start_date = train_end_date - pd.DateOffset(years=self.train_years)
         
         train_mask = (dates >= train_start_date) & (dates <= train_end_date)
         train_indices = df[train_mask].index
@@ -102,12 +109,13 @@ class WalkForwardSplitter:
     """
     Generates indices for Walk-Forward Validation (Rolling Window).
     """
-    def __init__(self, start_date, train_years, val_months, buffer_days, step_months=1):
+    def __init__(self, start_date, train_years, val_months, buffer_days, step_months=1, train_start_date=None):
         self.start_date = pd.to_datetime(start_date)
         self.train_years = train_years
         self.val_months = val_months
         self.buffer_days = buffer_days
         self.step_months = step_months
+        self.train_start_date = pd.to_datetime(train_start_date) if train_start_date else None
         
     def split(self, df):
         """
@@ -145,7 +153,13 @@ class WalkForwardSplitter:
             
             # Define Train Window
             train_end = val_start - pd.Timedelta(days=self.buffer_days)
-            train_start = train_end - pd.DateOffset(years=self.train_years)
+            
+            if self.train_start_date:
+                # Expanding Window
+                train_start = self.train_start_date
+            else:
+                # Rolling Window
+                train_start = train_end - pd.DateOffset(years=self.train_years)
             
             train_mask = (dates >= train_start) & (dates <= train_end)
             train_idx = df[train_mask].index

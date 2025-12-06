@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
-from ML import config, data_prep, models, utils
+from ML import config, data_prep, models, utils, metrics
 
 def main():
     # Initialize Logger
@@ -22,7 +22,9 @@ def main():
         train_years=config.TRAIN_WINDOW_YEARS,
         val_months=config.VAL_WINDOW_MONTHS,
         buffer_days=config.BUFFER_DAYS,
-        step_months=1
+        buffer_days=config.BUFFER_DAYS,
+        step_months=1,
+        train_start_date=config.TRAIN_START_DATE
     )
     
     target_col = config.TARGET_COL
@@ -60,13 +62,24 @@ def main():
     
     rmse = np.sqrt(mean_squared_error(all_actuals, all_preds))
     mae = mean_absolute_error(all_actuals, all_preds)
+    rmse = np.sqrt(mean_squared_error(all_actuals, all_preds))
+    mae = mean_absolute_error(all_actuals, all_preds)
     dir_acc = np.mean(np.sign(all_actuals) == np.sign(all_preds)) * 100
+    
+    # Advanced Metrics
+    ic = metrics.calculate_ic(all_actuals, all_preds)
+    strat_metrics = metrics.calculate_strategy_metrics(all_actuals, all_preds)
+    tail_metrics = metrics.calculate_tail_metrics(all_actuals, all_preds, threshold=0.05)
     
     print(f"\n--- Walk-Forward Results (Aggregated) ---")
     print(f"Total Samples: {len(all_actuals)}")
     print(f"RMSE: {rmse:.6f}")
     print(f"MAE:  {mae:.6f}")
     print(f"Directional Accuracy: {dir_acc:.2f}%")
+    print(f"IC: {ic:.4f}")
+    print(f"Sharpe (Ann.): {strat_metrics['sharpe']:.2f}")
+    print(f"Big Shift Precision (Up): {tail_metrics['precision_up_strict']:.2f}")
+    print(f"Big Shift Recall (Up): {tail_metrics['recall_up_strict']:.2f}")
     
     # 4. Plot
     fig = plt.figure(figsize=(12, 6))
@@ -80,7 +93,14 @@ def main():
     logger.save_plot(fig, filename="forecast_plot_walkforward.png")
     
     # Construct metrics dicts for logger
-    metrics_test = {'rmse': rmse, 'mae': mae, 'dir_acc': dir_acc}
+    metrics_test = {
+        'rmse': rmse, 
+        'mae': mae, 
+        'dir_acc': dir_acc,
+        'ic': ic,
+        'strat_metrics': strat_metrics,
+        'tail_metrics': tail_metrics
+    }
     metrics_val = {'rmse': 0, 'mae': 0, 'dir_acc': 0} # Placeholder
     metrics_train = {'rmse': 0, 'mae': 0, 'dir_acc': 0} # Placeholder
     
