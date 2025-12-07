@@ -132,10 +132,14 @@ def main():
     print("Consolidating...")
     
     # Slice to start from 2010-01-01 as requested
+    # Add Raw Price for Target Creation
+    features_df['SPY_Price'] = spy_close
+    
+    # Slice to start from 2010-01-01 as requested
     features_df = features_df[features_df.index >= '2010-01-01']
     
-    print("Saving to final_features_v4.csv...")
-    features_df.to_csv('final_features_v4.csv')
+    print("Saving to final_features_v6.csv...")
+    features_df.to_csv('Output/final_features_v6.csv')
     
     print("First 5 rows:")
     print(features_df.head())

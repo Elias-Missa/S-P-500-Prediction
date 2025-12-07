@@ -3,7 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
-from ML import config, data_prep, models, utils, metrics
+from ML import config, data_prep, models, utils, metrics, lstm_dataset
+import torch
+import torch.nn as nn
+from sklearn.preprocessing import StandardScaler
 
 def main():
     # Initialize Logger
@@ -21,7 +24,6 @@ def main():
         start_date=config.TEST_START_DATE,
         train_years=config.TRAIN_WINDOW_YEARS,
         val_months=config.VAL_WINDOW_MONTHS,
-        buffer_days=config.BUFFER_DAYS,
         buffer_days=config.BUFFER_DAYS,
         step_months=1,
         train_start_date=config.TRAIN_START_DATE
@@ -43,11 +45,64 @@ def main():
         X_test, y_test = df.loc[test_idx, feature_cols], df.loc[test_idx, target_col]
         
         # Train
-        model = models.ModelFactory.get_model(config.MODEL_TYPE)
-        model.fit(X_train, y_train)
-        
-        # Predict
-        y_pred = model.predict(X_test)
+        if config.MODEL_TYPE in ['LSTM', 'CNN']:
+            # --- Deep Learning Training Logic ---
+            # 1. Scale Data (Fit on Train, Transform on Test)
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled = scaler.transform(X_test)
+            
+            # 2. Reshape to 3D Sequences
+            time_steps = config.LSTM_TIME_STEPS
+            X_train_seq, y_train_seq = lstm_dataset.create_sequences(X_train_scaled, y_train.values, time_steps)
+            X_test_seq, y_test_seq = lstm_dataset.create_sequences(X_test_scaled, y_test.values, time_steps)
+            
+            # Check if sequences are empty (e.g. if fold is too small)
+            if len(X_train_seq) == 0 or len(X_test_seq) == 0:
+                print(f"Fold {fold}: Skipping due to insufficient data for sequence generation.")
+                continue
+            
+            # 3. Create DataLoader
+            train_loader = lstm_dataset.prepare_dataloader(X_train_seq, y_train_seq, batch_size=config.LSTM_BATCH_SIZE)
+            
+            # 4. Initialize Model
+            input_dim = X_train_seq.shape[2]
+            if config.MODEL_TYPE == 'LSTM':
+                model = models.ModelFactory.get_model('LSTM', input_dim=input_dim)
+                lr = config.LSTM_LEARNING_RATE
+                epochs = config.LSTM_EPOCHS
+            elif config.MODEL_TYPE == 'CNN':
+                model = models.ModelFactory.get_model('CNN', input_dim=input_dim)
+                lr = config.CNN_LEARNING_RATE
+                epochs = config.CNN_EPOCHS
+                
+            criterion = nn.MSELoss()
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+            
+            # 5. Train Loop
+            model.train()
+            for epoch in range(epochs):
+                for X_batch, y_batch in train_loader:
+                    optimizer.zero_grad()
+                    outputs = model(X_batch)
+                    loss = criterion(outputs, y_batch)
+                    loss.backward()
+                    optimizer.step()
+            
+            # 6. Predict
+            model.eval()
+            with torch.no_grad():
+                X_test_tensor = torch.tensor(X_test_seq, dtype=torch.float32)
+                y_pred = model(X_test_tensor).numpy().flatten()
+                
+            # Adjust Actuals (slice off first time_steps-1)
+            y_test = y_test.iloc[time_steps-1:]
+            
+        else:
+            # --- Standard ML Training ---
+            model = models.ModelFactory.get_model(config.MODEL_TYPE)
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
         
         # Store
         all_preds.extend(y_pred)

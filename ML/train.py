@@ -113,9 +113,17 @@ def main():
             # We don't have a global for learning_rate_init in config yet, likely default.
             # We should probably update ModelFactory to accept these overrides.
             
-    if config.MODEL_TYPE == 'LSTM':
-        # --- LSTM Training Logic ---
-        print("Preparing data for LSTM...")
+        elif config.MODEL_TYPE == 'CNN':
+            config.CNN_FILTERS = best_params.get('filters', config.CNN_FILTERS)
+            config.CNN_KERNEL_SIZE = best_params.get('kernel_size', config.CNN_KERNEL_SIZE)
+            config.CNN_LAYERS = best_params.get('layers', config.CNN_LAYERS)
+            config.CNN_DROPOUT = best_params.get('dropout', config.CNN_DROPOUT)
+            config.CNN_LEARNING_RATE = best_params.get('lr', config.CNN_LEARNING_RATE)
+            config.CNN_BATCH_SIZE = best_params.get('batch_size', config.CNN_BATCH_SIZE)
+            
+    if config.MODEL_TYPE in ['LSTM', 'CNN']:
+        # --- Deep Learning Training Logic ---
+        print(f"Preparing data for {config.MODEL_TYPE}...")
         
         # 1. Scale Data (Fit on Train, Transform on Val/Test)
         scaler = StandardScaler()
@@ -134,15 +142,29 @@ def main():
         
         # 4. Initialize Model
         input_dim = X_train_seq.shape[2]
-        dropout = best_params.get('dropout', 0.2) # Get from optuna or default
-        model = models.LSTMModel(input_dim, config.LSTM_HIDDEN_DIM, config.LSTM_LAYERS, dropout=dropout)
+        if config.MODEL_TYPE == 'LSTM':
+            dropout = best_params.get('dropout', 0.2)
+            model = models.LSTMModel(input_dim, config.LSTM_HIDDEN_DIM, config.LSTM_LAYERS, dropout=dropout)
+            lr = config.LSTM_LEARNING_RATE
+            epochs = config.LSTM_EPOCHS
+        elif config.MODEL_TYPE == 'CNN':
+            model = models.CNN1DModel(
+                input_dim, 
+                config.CNN_FILTERS, 
+                config.CNN_KERNEL_SIZE, 
+                config.CNN_LAYERS, 
+                dropout=config.CNN_DROPOUT
+            )
+            lr = config.CNN_LEARNING_RATE
+            epochs = config.CNN_EPOCHS
+            
         criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=config.LSTM_LEARNING_RATE)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
         
         # 5. Train Loop
-        print(f"Training LSTM for {config.LSTM_EPOCHS} epochs...")
+        print(f"Training {config.MODEL_TYPE} for {epochs} epochs...")
         model.train()
-        for epoch in range(config.LSTM_EPOCHS):
+        for epoch in range(epochs):
             epoch_loss = 0
             for X_batch, y_batch in train_loader:
                 optimizer.zero_grad()

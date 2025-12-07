@@ -29,6 +29,8 @@ class HyperparameterTuner:
             study.optimize(self._objective_random_forest, n_trials=n_trials)
         elif self.model_type == 'MLP':
             study.optimize(self._objective_mlp, n_trials=n_trials)
+        elif self.model_type == 'CNN':
+            study.optimize(self._objective_cnn, n_trials=n_trials)
         else:
             print(f"Optuna not implemented for {self.model_type}. Skipping.")
             return {}
@@ -147,4 +149,51 @@ class HyperparameterTuner:
         y_pred = model.predict(self.X_val)
         
         mse = mean_squared_error(self.y_val, y_pred)
+        return mse
+
+    def _objective_cnn(self, trial):
+        # Define Search Space
+        filters = trial.suggest_categorical('filters', [32, 64, 128])
+        kernel_size = trial.suggest_int('kernel_size', 2, 5)
+        layers = trial.suggest_int('layers', 1, 3)
+        dropout = trial.suggest_float('dropout', 0.1, 0.5)
+        lr = trial.suggest_float('lr', 1e-4, 1e-2, log=True)
+        batch_size = trial.suggest_categorical('batch_size', [16, 32, 64])
+        
+        # Prepare Data (Same as LSTM)
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(self.X_train)
+        X_val_scaled = scaler.transform(self.X_val)
+        
+        time_steps = config.LSTM_TIME_STEPS # Share time steps with LSTM for now
+        X_train_seq, y_train_seq = lstm_dataset.create_sequences(X_train_scaled, self.y_train.values, time_steps)
+        X_val_seq, y_val_seq = lstm_dataset.create_sequences(X_val_scaled, self.y_val.values, time_steps)
+        
+        train_loader = lstm_dataset.prepare_dataloader(X_train_seq, y_train_seq, batch_size=batch_size)
+        
+        # Initialize Model
+        input_dim = X_train_seq.shape[2]
+        model = models.CNN1DModel(input_dim, filters, kernel_size, layers, dropout=dropout)
+        criterion = nn.MSELoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        
+        # Train Loop
+        epochs = 10
+        model.train()
+        for epoch in range(epochs):
+            for X_batch, y_batch in train_loader:
+                optimizer.zero_grad()
+                outputs = model(X_batch)
+                loss = criterion(outputs, y_batch)
+                loss.backward()
+                optimizer.step()
+        
+        # Evaluate
+        model.eval()
+        with torch.no_grad():
+            X_val_tensor = torch.tensor(X_val_seq, dtype=torch.float32)
+            y_pred = model(X_val_tensor).numpy().flatten()
+            
+        y_val_actual = self.y_val.iloc[time_steps-1:]
+        mse = mean_squared_error(y_val_actual, y_pred)
         return mse

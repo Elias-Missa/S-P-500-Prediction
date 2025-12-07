@@ -6,9 +6,14 @@ from . import config
 class ExperimentLogger:
     def __init__(self, model_name="Model", process_tag="Static"):
         # Create base ML_Output directory
-        self.base_dir = r'C:\Users\eomis\SP500 Project\S-P-500-Prediction\ML_Output'
+        # Use config.REPO_ROOT if available, or calculate it locally to be safe
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.base_dir = os.path.join(repo_root, 'ML_Output')
+        
         if not os.path.exists(self.base_dir):
             os.makedirs(self.base_dir)
+            
+        self.process_tag = process_tag
             
         # Determine Run Number (Ordinal)
         # Scan existing folders to count how many times this model has been run
@@ -42,8 +47,7 @@ class ExperimentLogger:
         summary_path = os.path.join(self.run_dir, "summary.md")
         
         # Determine Process Type for Header
-        process_tag = self.run_dir.split('_')[-3] # Extract from folder name or pass in
-        # A safer way is to store it in __init__
+        process_tag = self.process_tag
         
         with open(summary_path, 'w') as f:
             f.write(f"# ML Run Summary\n\n")

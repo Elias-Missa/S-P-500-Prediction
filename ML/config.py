@@ -1,7 +1,10 @@
+import os
+
 # ML Configuration
 
 # Data Paths
-DATA_PATH = r'C:\Users\eomis\SP500 Project\S-P-500-Prediction\Output\final_features_v6.csv'
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_PATH = os.path.join(REPO_ROOT, 'Output', 'final_features_v6.csv')
 
 # Target Definition
 TARGET_HORIZON = 21  # 1 Month (Trading Days)
@@ -10,13 +13,13 @@ TARGET_COL = 'Target_1M'
 # Splitting Parameters
 TEST_START_DATE = '2023-01-01'
 TRAIN_START_DATE = '2010-01-01' # If set, overrides TRAIN_WINDOW_YEARS for an Expanding Window
-TRAIN_WINDOW_YEARS = None # Set to integer (e.g., 5) for Rolling Window, or None to use TRAIN_START_DATE
+TRAIN_WINDOW_YEARS = 10 # Default rolling window if TRAIN_START_DATE is None
 VAL_WINDOW_MONTHS = 6
 BUFFER_DAYS = 21  # Embargo period to prevent leakage (should be >= TARGET_HORIZON)
 
 # Model Parameters
 # Options: 'LinearRegression', 'RandomForest', 'XGBoost', 'MLP'
-MODEL_TYPE = 'LSTM'
+MODEL_TYPE = 'CNN'
 
 # Random Forest Params
 RF_N_ESTIMATORS = 100
@@ -38,11 +41,21 @@ MLP_MAX_ITER = 500
 
 # LSTM Params
 LSTM_TIME_STEPS = 10
-LSTM_HIDDEN_DIM = 64
-LSTM_LAYERS = 2
+LSTM_HIDDEN_DIM = 32
+LSTM_LAYERS = 1
 LSTM_EPOCHS = 50
 LSTM_BATCH_SIZE = 32
 LSTM_LEARNING_RATE = 0.001
+
+# CNN Params
+CNN_FILTERS = 64
+CNN_KERNEL_SIZE = 3
+CNN_POOL_SIZE = 2
+CNN_LAYERS = 2
+CNN_DROPOUT = 0.2
+CNN_EPOCHS = 50
+CNN_BATCH_SIZE = 32
+CNN_LEARNING_RATE = 0.001
 
 # Optuna Tuning
 USE_OPTUNA = True

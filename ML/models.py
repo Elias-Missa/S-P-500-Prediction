@@ -13,7 +13,7 @@ from . import config
 
 class ModelFactory:
     @staticmethod
-    def get_model(model_type):
+    def get_model(model_type, input_dim=None):
         if model_type == 'LinearRegression':
             return LinearRegression()
             
@@ -49,10 +49,24 @@ class ModelFactory:
             )
             
         elif model_type == 'LSTM':
+            if input_dim is None:
+                raise ValueError("input_dim must be provided for LSTM")
             return LSTMModel(
-                input_dim=34, # Will be dynamic in training loop, but class needs init
+                input_dim=input_dim,
                 hidden_dim=config.LSTM_HIDDEN_DIM,
                 num_layers=config.LSTM_LAYERS,
+                output_dim=1
+            )
+            
+        elif model_type == 'CNN':
+            if input_dim is None:
+                raise ValueError("input_dim must be provided for CNN")
+            return CNN1DModel(
+                input_dim=input_dim,
+                filters=config.CNN_FILTERS,
+                kernel_size=config.CNN_KERNEL_SIZE,
+                layers=config.CNN_LAYERS,
+                dropout=config.CNN_DROPOUT,
                 output_dim=1
             )
             
@@ -79,4 +93,39 @@ class LSTMModel(nn.Module):
         
         # Decode the hidden state of the last time step
         out = self.fc(out[:, -1, :])
+        return out
+
+class CNN1DModel(nn.Module):
+    def __init__(self, input_dim, filters, kernel_size, layers, output_dim=1, dropout=0.2):
+        super(CNN1DModel, self).__init__()
+        
+        self.layers = nn.ModuleList()
+        self.layers.append(nn.Conv1d(in_channels=input_dim, out_channels=filters, kernel_size=kernel_size, padding='same'))
+        self.layers.append(nn.ReLU())
+        self.layers.append(nn.Dropout(dropout))
+        
+        for _ in range(layers - 1):
+            self.layers.append(nn.Conv1d(in_channels=filters, out_channels=filters, kernel_size=kernel_size, padding='same'))
+            self.layers.append(nn.ReLU())
+            self.layers.append(nn.Dropout(dropout))
+            
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Linear(filters, output_dim)
+        
+    def forward(self, x):
+        # x shape: (batch, seq_len, input_dim)
+        # Conv1d expects (batch, input_dim, seq_len)
+        x = x.permute(0, 2, 1)
+        
+        for layer in self.layers:
+            x = layer(x)
+            
+        # Global Average Pooling -> (batch, filters, 1)
+        x = self.global_pool(x)
+        
+        # Flatten -> (batch, filters)
+        x = x.squeeze(-1)
+        
+        # FC -> (batch, output_dim)
+        out = self.fc(x)
         return out

@@ -40,21 +40,11 @@ def calculate_strategy_metrics(y_true, y_pred):
         sharpe = (mean_ret / std_ret) * np.sqrt(12) # Assuming monthly steps
         
     # Max Drawdown
-    # Construct equity curve
-    equity_curve = np.cumsum(strategy_returns)
-    peak = np.maximum.accumulate(equity_curve)
-    drawdown = (equity_curve - peak) # Simple difference for log returns or approx
-    # For percentage returns, it's usually (Equity / Peak) - 1.
-    # Let's assume y_true are simple returns.
-    # Compounded equity curve:
+    # Construct compounded equity curve
     # equity = (1 + strategy_returns).cumprod()
-    # But y_true might be log returns or simple. Let's assume simple.
-    
-    # To be robust, let's use simple summation for now if returns are small, 
-    # or proper compounding. Given 1-month returns can be large, compounding is safer.
-    # However, if we are shorting, -10% return becomes +10%.
-    
-    # Simplified Max Drawdown on cumulative sum (approx for log returns)
+    equity_curve = np.cumprod(1 + strategy_returns)
+    peak = np.maximum.accumulate(equity_curve)
+    drawdown = (equity_curve - peak) / peak
     max_dd = np.min(drawdown) if len(drawdown) > 0 else 0.0
     
     return {

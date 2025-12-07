@@ -21,11 +21,21 @@ def load_and_prep_data():
     # So 'Return_1M' shifted by -21 gives us the return from t to t+21?
     # Yes: Shifted(-21)[t] = Return_1M[t+21] = (Price_{t+21} - Price_t) / Price_t.
     
-    # Check if Return_1M exists (it should from Phase 6)
-    if 'Return_1M' in df.columns:
+    # Check if SPY_Price exists (Added in v6)
+    if 'SPY_Price' in df.columns:
+        # Calculate percentage return over TARGET_HORIZON
+        # (Price_{t+h} - Price_t) / Price_t
+        df[config.TARGET_COL] = (df['SPY_Price'].shift(-config.TARGET_HORIZON) - df['SPY_Price']) / df['SPY_Price']
+        
+        # Drop SPY_Price from features to avoid leakage/non-stationarity
+        # We keep it only for target creation.
+        df.drop(columns=['SPY_Price'], inplace=True)
+        
+    elif 'Return_1M' in df.columns:
+        print("Warning: SPY_Price not found. Using Return_1M approximation.")
         df[config.TARGET_COL] = df['Return_1M'].shift(-config.TARGET_HORIZON)
     else:
-        raise ValueError("Return_1M feature missing. Cannot create target.")
+        raise ValueError("Cannot create target. Missing SPY_Price or Return_1M.")
     
     # Drop NaNs created by shifting (last 21 days will be NaN)
     # And initial NaNs
