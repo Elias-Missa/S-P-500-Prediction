@@ -38,11 +38,11 @@ def fetch_data(start_date='2010-01-01'):
         try:
             print(f"Downloading {name} ({ticker})...")
             df = yf.download(ticker, start=start_date, progress=False)
-            
+
             # yfinance returns MultiIndex columns if multiple tickers, but here we do one by one.
             # However, recent yfinance versions might return MultiIndex even for single ticker if not flattened properly or depending on version.
             # Usually it's 'Adj Close' or 'Close'. Let's prefer 'Adj Close' if available, else 'Close'.
-            
+
             if 'Adj Close' in df.columns:
                 series = df['Adj Close']
             elif 'Close' in df.columns:
@@ -56,12 +56,18 @@ def fetch_data(start_date='2010-01-01'):
 
             # Rename series
             series.name = name
-            
+
             if yf_data.empty:
                 yf_data = pd.DataFrame(series)
             else:
                 yf_data = yf_data.join(series, how='outer')
-                
+
+            # Preserve SPY volume so downstream breadth features do not need an extra download.
+            if name == 'SPY' and 'Volume' in df.columns:
+                volume_series = df['Volume']
+                volume_series.name = 'SPY_Volume'
+                yf_data = yf_data.join(volume_series, how='outer')
+
         except Exception as e:
             print(f"Warning: Could not fetch {name} ({ticker}): {e}")
             # Handle specific placeholders

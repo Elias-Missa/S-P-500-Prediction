@@ -55,41 +55,7 @@ def main():
     
     # Breadth
     print("Calculating Breadth features...")
-    # Volume for SPY (Wait, yfinance download might have 'Volume' if we didn't filter it out)
-    # In data_loader, we only selected 'Adj Close' or 'Close'.
-    # We need Volume for Vol_ROC.
-    # Ah, I missed fetching Volume in data_loader.py!
-    # I need to fix data_loader.py to include Volume for SPY.
-    # Or I can fetch it here separately, but better to fix data_loader.
-    
-    # Let's check if I can quick-fix data_loader or just fetch volume here?
-    # The requirement said "data_loader.py: Create a robust data loader that fetches...".
-    # I should probably update data_loader.py to return Volume as well, or at least for SPY.
-    
-    # However, to avoid breaking flow, I will fetch SPY volume here or use a separate call?
-    # No, let's do it right. I will modify data_loader.py to include Volume.
-    # But wait, yfinance returns a DataFrame with Open, High, Low, Close, Volume.
-    # My data_loader logic selected only one column.
-    
-    # Let's pause main.py creation and fix data_loader.py first?
-    # Or I can just fetch SPY volume inside main.py for now as a patch?
-    # "Vol_ROC: 5-day Rate of Change of Volume."
-    # I'll add a specific fetch for SPY Volume in main.py to be safe and simple for now, 
-    # as modifying data_loader might require re-running the heavy fetch.
-    # Actually, fetching just SPY volume is fast.
-    
-    import yfinance as yf
-    print("Fetching SPY Volume...")
-    # Also fetch from 2008 to match the main df
-    spy_full = yf.download('SPY', start='2008-01-01', progress=False)
-    if 'Volume' in spy_full.columns:
-        spy_volume = spy_full['Volume']
-    else:
-        spy_volume = pd.Series(np.nan, index=df.index)
-        
-    # Align volume to df index
-    spy_volume = spy_volume.reindex(df.index).ffill()
-    
+    spy_volume = get_col('SPY_Volume')
     features_df['Vol_ROC'] = breadth.calculate_vol_roc(spy_volume)
     
     # Sector Breadth
