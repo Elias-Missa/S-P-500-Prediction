@@ -27,6 +27,11 @@ def load_and_prep_data():
     # Drop SPY_Price from features to avoid leakage/non-stationarity
     if 'SPY_Price' in df.columns:
         df.drop(columns=['SPY_Price'], inplace=True)
+    
+    # Drop Log_Target_1M - this is a transformed version of the target (LEAKAGE!)
+    if 'Log_Target_1M' in df.columns:
+        print("Dropping Log_Target_1M to prevent target leakage.")
+        df.drop(columns=['Log_Target_1M'], inplace=True)
 
     # First, drop columns that are ALL NaN (like ISM_PMI if it's empty)
     df.dropna(axis=1, how='all', inplace=True)
