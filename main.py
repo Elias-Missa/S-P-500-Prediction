@@ -1,7 +1,11 @@
-import pandas as pd
+import os
+
 import numpy as np
+import pandas as pd
+
+from ML import config
 from data_loader import fetch_data
-from features import trend, volatility, breadth, cross_asset, macro, sentiment
+from features import cross_asset, macro, sentiment, trend, volatility, breadth
 
 def main():
     print("Starting Feature Engineering Pipeline...")
@@ -83,8 +87,11 @@ def main():
     t10y2y = get_col('T10Y2Y')
     features_df['Yield_Curve'] = macro.calculate_yield_curve(t10y2y)
     
-    napm = get_col('NAPM')
-    features_df['ISM_PMI'] = macro.calculate_ism_pmi(napm)
+    ism_pmi = get_col('ISM_PMI')
+    features_df['ISM_PMI'] = macro.calculate_ism_pmi(ism_pmi)
+
+    umich = get_col('UMICH_SENT')
+    features_df['UMich_Sentiment'] = macro.calculate_consumer_sentiment(umich)
     
     # Sentiment
     print("Calculating Sentiment features...")
@@ -96,17 +103,32 @@ def main():
     
     # 3. Consolidate and Save
     print("Consolidating...")
-    
-    # Slice to start from 2010-01-01 as requested
+
+    # Pull through quality control flags from the loader
+    quality_cols = [c for c in df.columns if c.startswith('QC_')]
+    for qc_col in quality_cols:
+        features_df[qc_col] = df[qc_col]
+
     # Add Raw Price for Target Creation
     features_df['SPY_Price'] = spy_close
-    
+
+    # Targets
+    target_horizon = getattr(config, 'TARGET_HORIZON', 21)
+    target_col = getattr(config, 'TARGET_COL', 'Target_1M')
+    features_df[target_col] = (spy_close.shift(-target_horizon) - spy_close) / spy_close
+    features_df[f'Log_{target_col}'] = np.log(spy_close.shift(-target_horizon) / spy_close)
+
     # Slice to start from 2010-01-01 as requested
     features_df = features_df[features_df.index >= '2010-01-01']
-    
-    print("Saving to final_features_v6.csv...")
-    features_df.to_csv('Output/final_features_v6.csv')
-    
+
+    # Drop rows where the target is not yet available (tail rows after shifting)
+    features_df.dropna(subset=[target_col], inplace=True)
+
+    os.makedirs('Output', exist_ok=True)
+    output_path = os.path.join('Output', 'final_features_with_target.csv')
+    print(f"Saving to {output_path}...")
+    features_df.to_csv(output_path)
+
     print("First 5 rows:")
     print(features_df.head())
     print("Pipeline Complete.")
