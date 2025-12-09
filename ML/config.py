@@ -4,7 +4,8 @@ import os
 
 # Data Paths
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_PATH = os.path.join(REPO_ROOT, 'Output', 'final_features_v6.csv')
+DATA_PATH = os.path.join(REPO_ROOT, 'Output', 'final_features_with_target.csv')
+QUALITY_REPORT_PATH = os.path.join(REPO_ROOT, 'Output', 'data_quality_report.csv')
 
 # Target Definition
 TARGET_HORIZON = 21  # 1 Month (Trading Days)
@@ -18,8 +19,9 @@ VAL_WINDOW_MONTHS = 6
 BUFFER_DAYS = 21  # Embargo period to prevent leakage (should be >= TARGET_HORIZON)
 
 # Model Parameters
-# Options: 'LinearRegression', 'RandomForest', 'XGBoost', 'MLP'
+# Options: 'LinearRegression', 'RandomForest', 'XGBoost', 'MLP', 'LSTM', 'CNN'
 MODEL_TYPE = 'CNN'
+BASIC_MODEL_SUITE = ['LinearRegression', 'RandomForest', 'XGBoost', 'MLP']
 
 # Random Forest Params
 RF_N_ESTIMATORS = 100

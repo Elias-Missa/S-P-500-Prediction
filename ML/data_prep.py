@@ -11,43 +11,36 @@ def load_and_prep_data():
     """
     print(f"Loading data from {config.DATA_PATH}...")
     df = pd.read_csv(config.DATA_PATH, index_col=0, parse_dates=True)
-    
-    # Create Target: Future Return
-    # We want to predict the return over the next TARGET_HORIZON days.
-    # Formula: (Price_{t+h} - Price_t) / Price_t
-    # But we don't have raw price in features file easily accessible (we have MA_Dist etc).
-    # However, we can reconstruct it or just use the 'Return_1M' shifted backwards?
-    # 'Return_1M' at time t is (Price_t - Price_{t-21}) / Price_{t-21}.
-    # So 'Return_1M' shifted by -21 gives us the return from t to t+21?
-    # Yes: Shifted(-21)[t] = Return_1M[t+21] = (Price_{t+21} - Price_t) / Price_t.
-    
-    # Check if SPY_Price exists (Added in v6)
-    if 'SPY_Price' in df.columns:
-        # Calculate percentage return over TARGET_HORIZON
-        # (Price_{t+h} - Price_t) / Price_t
+    df.sort_index(inplace=True)
+
+    # Respect pre-computed targets when provided by the feature pipeline
+    if config.TARGET_COL in df.columns:
+        print(f"Found precomputed target column {config.TARGET_COL}. Using in-place values.")
+    elif 'SPY_Price' in df.columns:
         df[config.TARGET_COL] = (df['SPY_Price'].shift(-config.TARGET_HORIZON) - df['SPY_Price']) / df['SPY_Price']
-        
-        # Drop SPY_Price from features to avoid leakage/non-stationarity
-        # We keep it only for target creation.
-        df.drop(columns=['SPY_Price'], inplace=True)
-        
     elif 'Return_1M' in df.columns:
         print("Warning: SPY_Price not found. Using Return_1M approximation.")
         df[config.TARGET_COL] = df['Return_1M'].shift(-config.TARGET_HORIZON)
     else:
         raise ValueError("Cannot create target. Missing SPY_Price or Return_1M.")
-    
-    # Drop NaNs created by shifting (last 21 days will be NaN)
-    # And initial NaNs
-    
+
+    # Drop SPY_Price from features to avoid leakage/non-stationarity
+    if 'SPY_Price' in df.columns:
+        df.drop(columns=['SPY_Price'], inplace=True)
+
     # First, drop columns that are ALL NaN (like ISM_PMI if it's empty)
     df.dropna(axis=1, how='all', inplace=True)
-    
-    # Then drop rows with any remaining NaNs
-    # Note: This might still drop a lot if some new features have gaps.
-    # For now, we'll be strict.
+
+    # Fill gaps conservatively to avoid throwing away otherwise useful rows
+    df.ffill(inplace=True)
+    df.bfill(inplace=True)
+
+    # Remove rows where the target remains undefined (tail after shifting)
+    df.dropna(subset=[config.TARGET_COL], inplace=True)
+
+    # Drop any remaining rows that still include gaps
     df.dropna(inplace=True)
-    
+
     print(f"Data loaded: {len(df)} rows. Columns: {len(df.columns)}")
     return df
 

@@ -31,13 +31,12 @@ def calculate_sectors_above_50ma(sector_prices_df):
     
     # Check if Price > SMA
     above_sma = sector_prices_df > sma_50
-    
+
     # Sum across columns (axis=1) to get count of sectors above SMA
-    count_above = above_sma.sum(axis=1)
-    
-    # Calculate percentage
-    # Note: We should handle cases where data might be missing for some sectors
-    # But assuming forward fill in data_loader, it should be fine.
-    total_sectors = sector_prices_df.shape[1]
-    
-    return (count_above / total_sectors) * 100.0
+    count_above = above_sma.sum(axis=1, skipna=True)
+
+    # Calculate percentage based on available sectors each day to handle partial histories
+    total_available = above_sma.notna().sum(axis=1)
+    pct = (count_above / total_available.replace(0, np.nan)) * 100.0
+
+    return pct
