@@ -162,4 +162,12 @@ def main():
     logger.log_summary(metrics_train, metrics_val, metrics_test, config.MODEL_TYPE, feature_cols)
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_type', type=str, help='Model type to train')
+    args = parser.parse_args()
+    
+    if args.model_type:
+        config.MODEL_TYPE = args.model_type
+        
     main()
