@@ -13,41 +13,48 @@ from . import config
 
 class ModelFactory:
     @staticmethod
-    def get_model(model_type, input_dim=None):
+    def get_model(model_type, input_dim=None, overrides=None):
+        overrides = overrides or {}
         if model_type == 'LinearRegression':
             return LinearRegression()
-            
+
         elif model_type == 'RandomForest':
-            return RandomForestRegressor(
-                n_estimators=config.RF_N_ESTIMATORS,
-                max_depth=config.RF_MAX_DEPTH,
-                min_samples_split=config.RF_MIN_SAMPLES_SPLIT,
-                min_samples_leaf=config.RF_MIN_SAMPLES_LEAF,
-                random_state=config.RF_RANDOM_STATE,
-                n_jobs=-1
-            )
-            
+            params = {
+                'n_estimators': config.RF_N_ESTIMATORS,
+                'max_depth': config.RF_MAX_DEPTH,
+                'min_samples_split': config.RF_MIN_SAMPLES_SPLIT,
+                'min_samples_leaf': config.RF_MIN_SAMPLES_LEAF,
+                'random_state': config.RF_RANDOM_STATE,
+                'n_jobs': -1
+            }
+            params.update({k: v for k, v in overrides.items() if k in params})
+            return RandomForestRegressor(**params)
+
         elif model_type == 'XGBoost':
             if XGBRegressor is None:
                 raise ImportError("XGBoost not installed.")
-            return XGBRegressor(
-                n_estimators=config.XGB_N_ESTIMATORS,
-                learning_rate=config.XGB_LEARNING_RATE,
-                max_depth=config.XGB_MAX_DEPTH,
-                n_jobs=-1,
-                random_state=42
-            )
-            
+            params = {
+                'n_estimators': config.XGB_N_ESTIMATORS,
+                'learning_rate': config.XGB_LEARNING_RATE,
+                'max_depth': config.XGB_MAX_DEPTH,
+                'n_jobs': -1,
+                'random_state': 42
+            }
+            params.update({k: v for k, v in overrides.items() if k in params})
+            return XGBRegressor(**params)
+
         elif model_type == 'MLP':
-            return MLPRegressor(
-                hidden_layer_sizes=config.MLP_HIDDEN_LAYERS,
-                learning_rate_init=config.MLP_LEARNING_RATE_INIT,
-                alpha=config.MLP_ALPHA,
-                max_iter=config.MLP_MAX_ITER,
-                random_state=42,
-                early_stopping=True
-            )
-            
+            params = {
+                'hidden_layer_sizes': config.MLP_HIDDEN_LAYERS,
+                'learning_rate_init': config.MLP_LEARNING_RATE_INIT,
+                'alpha': config.MLP_ALPHA,
+                'max_iter': config.MLP_MAX_ITER,
+                'random_state': 42,
+                'early_stopping': True
+            }
+            params.update({k: v for k, v in overrides.items() if k in params})
+            return MLPRegressor(**params)
+
         elif model_type == 'LSTM':
             if input_dim is None:
                 raise ValueError("input_dim must be provided for LSTM")

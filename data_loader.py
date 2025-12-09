@@ -1,8 +1,42 @@
-import yfinance as yf
+import os
+from datetime import datetime
+
+import numpy as np
 import pandas as pd
 import pandas_datareader.data as web
-import numpy as np
-from datetime import datetime
+import yfinance as yf
+
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Output')
+
+def _fetch_fred_series(candidates, start_date, target_name):
+    """Try a list of FRED tickers in order and return the first successful series."""
+    for ticker in candidates:
+        try:
+            print(f"Downloading {target_name} from FRED using {ticker}...")
+            df = web.DataReader(ticker, 'fred', start=start_date)
+            df.columns = [target_name]
+            if df.dropna().empty:
+                raise ValueError("Series contains only NaNs")
+            return df, ticker
+        except Exception as e:
+            print(f"Warning: Could not fetch {target_name} ({ticker}) from FRED: {e}")
+    print(f"All fallbacks failed for {target_name}. Returning empty series.")
+    return pd.DataFrame(columns=[target_name]), None
+
+
+def _export_quality_report(df):
+    """Persist a lightweight data-quality report for downstream debugging."""
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+
+    report = pd.DataFrame({
+        'missing_pct': df.isna().mean() * 100,
+        'zero_pct': (df == 0).mean() * 100,
+        'min': df.min(numeric_only=True),
+        'max': df.max(numeric_only=True)
+    })
+    report.to_csv(os.path.join(OUTPUT_DIR, 'data_quality_report.csv'))
+
 
 def fetch_data(start_date='2010-01-01'):
     """
@@ -10,7 +44,7 @@ def fetch_data(start_date='2010-01-01'):
     
     Sources:
     - yfinance: SPY, ^VIX, CL=F, DX-Y.NYB, HYG, SHY, ^CPC, ^NYA50
-    - FRED: T10Y2Y, NAPM
+    - FRED: T10Y2Y, ISM_PMI (NAPM or PMI fallback), UMICH_SENT
     
     Returns:
         pd.DataFrame: Merged DataFrame with daily DatetimeIndex (forward-filled).
@@ -81,39 +115,64 @@ def fetch_data(start_date='2010-01-01'):
             else:
                 print(f"Critical warning: {name} failed.")
 
-    # 2. Fetch FRED data
-    fred_tickers = {
-        'T10Y2Y': 'T10Y2Y', # 10-Year Treasury Constant Maturity Minus 2-Year Treasury Constant Maturity
-        'NAPM': 'NAPM'      # ISM Manufacturing: PMI Composite Index
+    # 2. Fetch FRED data with fallbacks
+    macro_candidates = {
+        'T10Y2Y': ['T10Y2Y'],  # 10Y-2Y Spread
+        'ISM_PMI': ['NAPM', 'PMI'],  # ISM and S&P Global Manufacturing PMI
+        'UMICH_SENT': ['UMCSENT']  # University of Michigan Consumer Sentiment
     }
-    
+
     fred_data = pd.DataFrame()
-    for name, ticker in fred_tickers.items():
-        try:
-            print(f"Downloading {name} from FRED...")
-            df = web.DataReader(ticker, 'fred', start=start_date)
-            df.columns = [name]
-            
-            if fred_data.empty:
-                fred_data = df
-            else:
-                fred_data = fred_data.join(df, how='outer')
-        except Exception as e:
-            print(f"Warning: Could not fetch {name} from FRED: {e}")
+    fred_sources = {}
+    for name, tickers in macro_candidates.items():
+        df_macro, source = _fetch_fred_series(tickers, start_date, name)
+        fred_sources[name] = source
+
+        if fred_data.empty:
+            fred_data = df_macro
+        else:
+            fred_data = fred_data.join(df_macro, how='outer')
 
     # 3. Merge all data
     # Combine yfinance and FRED data
     full_df = yf_data.join(fred_data, how='outer')
+
+    quality_cols = pd.DataFrame(index=full_df.index)
     
     # 4. Handle missing columns / placeholders
     if '^CPC' not in full_df.columns:
-        print("Adding placeholder column for ^CPC (0s).")
-        full_df['^CPC'] = 0.0
-        
-    # ^NYA50 might be missing, logic in features/breadth.py will handle the proxy if column is NaN or missing.
-    # But let's ensure the column exists with NaNs if it wasn't fetched, so downstream code doesn't crash on KeyError.
+        print("Adding placeholder column for ^CPC (NaNs to be filled with median).")
+        full_df['^CPC'] = np.nan
+    quality_cols['QC_CPC_missing'] = full_df['^CPC'].isna().astype(int)
+
     if '^NYA50' not in full_df.columns:
         full_df['^NYA50'] = np.nan
+    quality_cols['QC_NYA50_missing'] = full_df['^NYA50'].isna().astype(int)
+
+    if 'ISM_PMI' in full_df.columns:
+        quality_cols['QC_ISM_PMI_missing'] = full_df['ISM_PMI'].isna().astype(int)
+    else:
+        full_df['ISM_PMI'] = np.nan
+        quality_cols['QC_ISM_PMI_missing'] = 1
+
+    # Fill/impute critical series with transparent defaults
+    median_cpc = full_df['^CPC'].median()
+    fallback_cpc = 0.7 if pd.isna(median_cpc) else median_cpc
+    full_df['^CPC'] = full_df['^CPC'].ffill().fillna(fallback_cpc)
+
+    if full_df['^NYA50'].isna().all():
+        print("Generating proxy breadth series for ^NYA50 from SPY 50-day trend.")
+        if 'SPY' in full_df.columns:
+            spy_series = full_df['SPY']
+            proxy = (spy_series > spy_series.rolling(50).mean()).astype(float) * 100.0
+            full_df['^NYA50'] = proxy
+            quality_cols['QC_NYA50_proxy'] = 1
+        else:
+            quality_cols['QC_NYA50_proxy'] = 0
+    else:
+        quality_cols['QC_NYA50_proxy'] = 0
+
+    full_df['ISM_PMI'] = full_df['ISM_PMI'].ffill().bfill()
 
     # 5. Clean up
     # Sort index
@@ -125,9 +184,14 @@ def fetch_data(start_date='2010-01-01'):
     # Drop rows before start_date (in case alignment brought in earlier dates)
     full_df = full_df[full_df.index >= pd.to_datetime(start_date)]
     
+    full_df = full_df.join(quality_cols)
+
+    _export_quality_report(full_df)
+
     print("Data fetch complete. Columns:", full_df.columns.tolist())
     print("Shape:", full_df.shape)
-    
+    print("FRED Sources used:", fred_sources)
+
     return full_df
 
 if __name__ == "__main__":
