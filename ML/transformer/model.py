@@ -96,7 +96,8 @@ class TransformerModel(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(
             encoder_layer,
             num_layers=num_layers,
-            norm=nn.LayerNorm(model_dim)
+            norm=nn.LayerNorm(model_dim),
+            enable_nested_tensor=False  # Disable nested tensor since norm_first=True
         )
         
         # Output projection: aggregate -> single regression output
