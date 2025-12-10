@@ -28,12 +28,33 @@ def evaluate(y_true, y_pred, set_name="Val"):
     # Advanced Metrics
     ic = metrics.calculate_ic(y_true, y_pred)
     strat_metrics = metrics.calculate_strategy_metrics(y_true, y_pred)
-    tail_metrics = metrics.calculate_tail_metrics(y_true, y_pred, threshold=0.05)
+    
+    # Use config threshold for tail metrics
+    big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+    tail_metrics = metrics.calculate_tail_metrics(y_true, y_pred, threshold=big_move_thresh)
+    
+    # Big-move-only strategy metrics
+    bigmove_strat = metrics.calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=big_move_thresh)
     
     print(f"IC: {ic:.4f}")
-    print(f"Sharpe (Ann.): {strat_metrics['sharpe']:.2f}")
-    print(f"Big Shift Precision (Up): {tail_metrics['precision_up_strict']:.2f}")
-    print(f"Big Shift Recall (Up): {tail_metrics['recall_up_strict']:.2f}")
+    print(f"\n  [Always-In Strategy]")
+    print(f"  Sharpe (Ann.): {strat_metrics['sharpe']:.2f}")
+    print(f"  Total Return: {strat_metrics['total_return']:.4f}")
+    print(f"  Max Drawdown: {strat_metrics['max_drawdown']:.4f}")
+    
+    print(f"\n  [Big-Move-Only Strategy] (threshold={big_move_thresh:.1%})")
+    print(f"  Sharpe (Ann.): {bigmove_strat['sharpe']:.2f}")
+    print(f"  Total Return: {bigmove_strat['total_return']:.4f}")
+    print(f"  Ann. Return: {bigmove_strat['ann_return']:.4f}")
+    print(f"  Max Drawdown: {bigmove_strat['max_drawdown']:.4f}")
+    print(f"  Trade Count: {bigmove_strat['trade_count']} ({bigmove_strat['holding_frequency']:.1%} of periods)")
+    print(f"  Avg Return/Trade: {bigmove_strat['avg_return_per_trade']:.4f}")
+    
+    print(f"\n  [Big Move Detection]")
+    print(f"  Precision (Up): {tail_metrics['precision_up_strict']:.2f}")
+    print(f"  Recall (Up): {tail_metrics['recall_up_strict']:.2f}")
+    print(f"  Precision (Down): {tail_metrics['precision_down_strict']:.2f}")
+    print(f"  Recall (Down): {tail_metrics['recall_down_strict']:.2f}")
     
     return {
         'rmse': rmse,
@@ -41,7 +62,8 @@ def evaluate(y_true, y_pred, set_name="Val"):
         'dir_acc': dir_acc,
         'ic': ic,
         'strat_metrics': strat_metrics,
-        'tail_metrics': tail_metrics
+        'tail_metrics': tail_metrics,
+        'bigmove_strat': bigmove_strat
     }
 
 

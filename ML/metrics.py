@@ -76,6 +76,94 @@ def calculate_strategy_metrics(y_true, y_pred):
         'max_drawdown': max_dd
     }
 
+
+def calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=0.03):
+    """
+    Simulates a strategy that only trades when a big move is predicted.
+    
+    - Long when pred > threshold
+    - Short when pred < -threshold  
+    - Flat (no position) otherwise
+    
+    Args:
+        y_true: Actual returns (array-like)
+        y_pred: Predicted returns (array-like)
+        threshold: Absolute return threshold for entering a position
+        
+    Returns:
+        Dictionary with strategy performance metrics
+    """
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    
+    # Define signals: only trade on predicted big moves
+    pred_up = y_pred > threshold
+    pred_down = y_pred < -threshold
+    
+    signals = np.zeros_like(y_pred)
+    signals[pred_up] = 1.0
+    signals[pred_down] = -1.0
+    
+    # Strategy returns (0 when flat)
+    strategy_returns = signals * y_true
+    
+    # Trade statistics
+    n_periods = len(y_true)
+    trade_mask = signals != 0
+    trade_count = np.sum(trade_mask)
+    holding_frequency = trade_count / n_periods if n_periods > 0 else 0.0
+    
+    # Only compute metrics on periods where we traded
+    if trade_count == 0:
+        return {
+            'total_return': 0.0,
+            'ann_return': 0.0,
+            'ann_volatility': 0.0,
+            'sharpe': 0.0,
+            'max_drawdown': 0.0,
+            'trade_count': 0,
+            'holding_frequency': 0.0,
+            'avg_return_per_trade': 0.0
+        }
+    
+    # Total and average return
+    total_return = np.sum(strategy_returns)
+    avg_return_per_trade = np.mean(strategy_returns[trade_mask])
+    
+    # Annualized metrics (assuming monthly data points)
+    # Annualized return: compound the average monthly return
+    mean_monthly = np.mean(strategy_returns)  # includes flat periods as 0
+    ann_return = mean_monthly * 12  # Simple annualization
+    
+    # Annualized volatility
+    std_monthly = np.std(strategy_returns)
+    ann_volatility = std_monthly * np.sqrt(12)
+    
+    # Sharpe ratio
+    if std_monthly == 0:
+        sharpe = 0.0
+    else:
+        sharpe = (mean_monthly / std_monthly) * np.sqrt(12)
+    
+    # Max drawdown on equity curve
+    # Start with $1, flat periods earn 0
+    equity_curve = np.cumprod(1 + strategy_returns)
+    peak = np.maximum.accumulate(equity_curve)
+    drawdown = (equity_curve - peak) / peak
+    max_dd = np.min(drawdown) if len(drawdown) > 0 else 0.0
+    
+    return {
+        'total_return': total_return,
+        'ann_return': ann_return,
+        'ann_volatility': ann_volatility,
+        'sharpe': sharpe,
+        'max_drawdown': max_dd,
+        'trade_count': int(trade_count),
+        'holding_frequency': holding_frequency,
+        'avg_return_per_trade': avg_return_per_trade
+    }
+
+
 def calculate_tail_metrics(y_true, y_pred, threshold=0.05):
     """
     Calculates Precision and Recall for 'Big Shifts' (> threshold).

@@ -127,17 +127,31 @@ class ExperimentLogger:
                 
             if 'strat_metrics' in metrics_test:
                 sm = metrics_test['strat_metrics']
-                f.write(f"- Strategy Return: {sm['total_return']:.4f}\n")
+                f.write(f"\n#### Always-In Strategy (Sign-Based)\n")
+                f.write(f"- Total Return: {sm['total_return']:.4f}\n")
                 f.write(f"- Sharpe Ratio: {sm['sharpe']:.2f}\n")
                 f.write(f"- Max Drawdown: {sm['max_drawdown']:.4f}\n")
+            
+            if 'bigmove_strat' in metrics_test:
+                bm = metrics_test['bigmove_strat']
+                f.write(f"\n#### Big-Move-Only Strategy\n")
+                f.write(f"> Only enters positions when predicted return exceeds threshold.\n\n")
+                f.write(f"- Total Return: {bm['total_return']:.4f}\n")
+                f.write(f"- Annualized Return: {bm['ann_return']:.4f}\n")
+                f.write(f"- Annualized Volatility: {bm['ann_volatility']:.4f}\n")
+                f.write(f"- Sharpe Ratio: {bm['sharpe']:.2f}\n")
+                f.write(f"- Max Drawdown: {bm['max_drawdown']:.4f}\n")
+                f.write(f"- Trade Count: {bm['trade_count']}\n")
+                f.write(f"- Holding Frequency: {bm['holding_frequency']:.1%}\n")
+                f.write(f"- Avg Return per Trade: {bm['avg_return_per_trade']:.4f}\n")
                 
             if 'tail_metrics' in metrics_test:
                 tm = metrics_test['tail_metrics']
-                f.write(f"\n#### Big Shift Details\n")
-                f.write(f"- Precision (Up): {tm['precision_up_strict']:.2f} (Count: {tm['count_pred_up']})\n")
-                f.write(f"- Recall (Up): {tm['recall_up_strict']:.2f} (Count: {tm['count_actual_up']})\n")
-                f.write(f"- Precision (Down): {tm['precision_down_strict']:.2f} (Count: {tm['count_pred_down']})\n")
-                f.write(f"- Recall (Down): {tm['recall_down_strict']:.2f} (Count: {tm['count_actual_down']})\n")
+                f.write(f"\n#### Big Move Detection Performance\n")
+                f.write(f"- Precision (Up): {tm['precision_up_strict']:.2f} (Predicted: {tm['count_pred_up']})\n")
+                f.write(f"- Recall (Up): {tm['recall_up_strict']:.2f} (Actual: {tm['count_actual_up']})\n")
+                f.write(f"- Precision (Down): {tm['precision_down_strict']:.2f} (Predicted: {tm['count_pred_down']})\n")
+                f.write(f"- Recall (Down): {tm['recall_down_strict']:.2f} (Actual: {tm['count_actual_down']})\n")
             
             f.write("\n")
             
