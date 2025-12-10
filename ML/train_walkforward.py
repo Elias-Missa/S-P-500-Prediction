@@ -7,6 +7,7 @@ from ML import config, data_prep, models, utils, metrics, lstm_dataset
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
+from ML.metrics import tail_weighted_mse
 
 def main():
     # Initialize Logger
@@ -38,6 +39,18 @@ def main():
     print(f"Model: {config.MODEL_TYPE}")
     print(f"Rolling Train Window: {config.TRAIN_WINDOW_YEARS} years")
     
+    # Determine time_steps for deep models
+    time_steps = None
+    if config.MODEL_TYPE == 'LSTM':
+        time_steps = getattr(config, 'LSTM_TIME_STEPS', 10)
+    elif config.MODEL_TYPE == 'CNN':
+        time_steps = getattr(config, 'CNN_TIME_STEPS', 10)
+    elif config.MODEL_TYPE == 'Transformer':
+        time_steps = getattr(config, 'TRANSFORMER_TIME_STEPS', 20)
+    
+    if time_steps is not None:
+        print(f"Using time_steps={time_steps} for sequence creation")
+    
     for fold, train_idx, val_idx, test_idx in splitter.split(df):
         # Prepare Data
         X_train, y_train = df.loc[train_idx, feature_cols], df.loc[train_idx, target_col]
@@ -45,7 +58,7 @@ def main():
         X_test, y_test = df.loc[test_idx, feature_cols], df.loc[test_idx, target_col]
         
         # Train
-        if config.MODEL_TYPE in ['LSTM', 'CNN']:
+        if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
             # --- Deep Learning Training Logic ---
             # 1. Scale Data (Fit on Train, Transform on Test)
             scaler = StandardScaler()
@@ -53,7 +66,6 @@ def main():
             X_test_scaled = scaler.transform(X_test)
             
             # 2. Reshape to 3D Sequences
-            time_steps = config.LSTM_TIME_STEPS
             X_train_seq, y_train_seq = lstm_dataset.create_sequences(X_train_scaled, y_train.values, time_steps)
             X_test_seq, y_test_seq = lstm_dataset.create_sequences(X_test_scaled, y_test.values, time_steps)
             
@@ -63,10 +75,17 @@ def main():
                 continue
             
             # 3. Create DataLoader
-            train_loader = lstm_dataset.prepare_dataloader(X_train_seq, y_train_seq, batch_size=config.LSTM_BATCH_SIZE)
+            if config.MODEL_TYPE == 'LSTM':
+                batch_size = config.LSTM_BATCH_SIZE
+            elif config.MODEL_TYPE == 'CNN':
+                batch_size = config.CNN_BATCH_SIZE
+            elif config.MODEL_TYPE == 'Transformer':
+                batch_size = config.TRANSFORMER_BATCH_SIZE
+            train_loader = lstm_dataset.prepare_dataloader(X_train_seq, y_train_seq, batch_size=batch_size)
             
             # 4. Initialize Model
             input_dim = X_train_seq.shape[2]
+            weight_decay = 0
             if config.MODEL_TYPE == 'LSTM':
                 model = models.ModelFactory.get_model('LSTM', input_dim=input_dim)
                 lr = config.LSTM_LEARNING_RATE
@@ -75,9 +94,16 @@ def main():
                 model = models.ModelFactory.get_model('CNN', input_dim=input_dim)
                 lr = config.CNN_LEARNING_RATE
                 epochs = config.CNN_EPOCHS
-                
-            criterion = nn.MSELoss()
-            optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+            elif config.MODEL_TYPE == 'Transformer':
+                model = models.ModelFactory.get_model('Transformer', input_dim=input_dim)
+                lr = config.TRANSFORMER_LR
+                weight_decay = config.TRANSFORMER_WEIGHT_DECAY
+                epochs = config.TRANSFORMER_EPOCHS
+            
+            # Tail-weighted loss parameters
+            big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+            tail_alpha = getattr(config, 'BIG_MOVE_ALPHA', 4.0)
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
             
             # 5. Train Loop
             model.train()
@@ -85,7 +111,7 @@ def main():
                 for X_batch, y_batch in train_loader:
                     optimizer.zero_grad()
                     outputs = model(X_batch)
-                    loss = criterion(outputs, y_batch)
+                    loss = tail_weighted_mse(outputs, y_batch, threshold=big_move_thresh, alpha=tail_alpha)
                     loss.backward()
                     optimizer.step()
             

@@ -39,6 +39,8 @@ class HyperparameterTuner:
             study.optimize(self._objective_mlp, n_trials=n_trials)
         elif self.model_type == 'CNN':
             study.optimize(self._objective_cnn, n_trials=n_trials)
+        elif self.model_type == 'Transformer':
+            study.optimize(self._objective_transformer, n_trials=n_trials)
         else:
             print(f"Optuna not implemented for {self.model_type}. Skipping.")
             return {}
@@ -49,6 +51,10 @@ class HyperparameterTuner:
 
     def _objective_lstm(self, trial):
         # Define Search Space
+        time_steps = trial.suggest_categorical(
+            'time_steps',
+            getattr(config, 'LSTM_LOOKBACK_CANDIDATES', [5, 10, 20, 30, 45, 60])
+        )
         hidden_dim = trial.suggest_categorical('hidden_dim', [32, 64, 128])
         num_layers = trial.suggest_int('num_layers', 1, 3)
         lr = trial.suggest_loguniform('lr', 1e-4, 1e-2)
@@ -60,7 +66,6 @@ class HyperparameterTuner:
         X_train_scaled = scaler.fit_transform(self.X_train)
         X_val_scaled = scaler.transform(self.X_val)
         
-        time_steps = config.LSTM_TIME_STEPS
         X_train_seq, y_train_seq = lstm_dataset.create_sequences(X_train_scaled, self.y_train.values, time_steps)
         X_val_seq, y_val_seq = lstm_dataset.create_sequences(X_val_scaled, self.y_val.values, time_steps)
         
@@ -73,7 +78,7 @@ class HyperparameterTuner:
         
         # Tail-weighted loss parameters
         big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
-        tail_alpha = getattr(config, 'TAIL_WEIGHT_ALPHA', 4.0)
+        tail_alpha = getattr(config, 'BIG_MOVE_ALPHA', 4.0)
         
         # Train Loop (Shortened for Tuning)
         epochs = 10 # Fewer epochs for tuning speed
@@ -204,6 +209,10 @@ class HyperparameterTuner:
 
     def _objective_cnn(self, trial):
         # Define Search Space
+        time_steps = trial.suggest_categorical(
+            'time_steps',
+            getattr(config, 'CNN_LOOKBACK_CANDIDATES', [5, 10, 20, 30, 45, 60])
+        )
         filters = trial.suggest_categorical('filters', [32, 64, 128])
         kernel_size = trial.suggest_int('kernel_size', 2, 5)
         layers = trial.suggest_int('layers', 1, 3)
@@ -211,12 +220,11 @@ class HyperparameterTuner:
         lr = trial.suggest_float('lr', 1e-4, 1e-2, log=True)
         batch_size = trial.suggest_categorical('batch_size', [16, 32, 64])
         
-        # Prepare Data (Same as LSTM)
+        # Prepare Data
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(self.X_train)
         X_val_scaled = scaler.transform(self.X_val)
         
-        time_steps = config.LSTM_TIME_STEPS # Share time steps with LSTM for now
         X_train_seq, y_train_seq = lstm_dataset.create_sequences(X_train_scaled, self.y_train.values, time_steps)
         X_val_seq, y_val_seq = lstm_dataset.create_sequences(X_val_scaled, self.y_val.values, time_steps)
         
@@ -229,9 +237,89 @@ class HyperparameterTuner:
         
         # Tail-weighted loss parameters
         big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
-        tail_alpha = getattr(config, 'TAIL_WEIGHT_ALPHA', 4.0)
+        tail_alpha = getattr(config, 'BIG_MOVE_ALPHA', 4.0)
         
         # Train Loop
+        epochs = 10
+        model.train()
+        for epoch in range(epochs):
+            for X_batch, y_batch in train_loader:
+                optimizer.zero_grad()
+                outputs = model(X_batch)
+                loss = tail_weighted_mse(outputs, y_batch, threshold=big_move_thresh, alpha=tail_alpha)
+                loss.backward()
+                optimizer.step()
+        
+        # Evaluate
+        model.eval()
+        with torch.no_grad():
+            X_val_tensor = torch.tensor(X_val_seq, dtype=torch.float32)
+            y_pred = model(X_val_tensor).numpy().flatten()
+            
+        y_val_actual = self.y_val.iloc[time_steps-1:]
+        
+        # Compute MSE
+        mse = mean_squared_error(y_val_actual, y_pred)
+        
+        # Compute big-move F1 scores
+        tail = calculate_tail_metrics(y_val_actual.values, y_pred, threshold=big_move_thresh)
+        big_f1_up = _f1_score(tail["precision_up_strict"], tail["recall_up_strict"])
+        big_f1_down = _f1_score(tail["precision_down_strict"], tail["recall_down_strict"])
+        
+        # Combined objective: penalize MSE, reward big-move F1
+        # Optuna minimizes, so subtract F1 terms
+        objective = mse - 0.5 * (big_f1_up + big_f1_down)
+        return objective
+
+    def _objective_transformer(self, trial):
+        """Optuna objective for Transformer hyperparameter tuning."""
+        from .transformer import TransformerModel
+        
+        # Define Search Space
+        time_steps = trial.suggest_categorical(
+            'time_steps',
+            getattr(config, 'TRANSFORMER_LOOKBACK_CANDIDATES', [10, 20, 30, 45, 60])
+        )
+        model_dim = trial.suggest_categorical('model_dim', [32, 64, 96])
+        num_heads = trial.suggest_categorical('num_heads', [2, 4, 8])
+        num_layers = trial.suggest_int('num_layers', 1, 4)
+        dim_feedforward = trial.suggest_categorical('dim_feedforward', [64, 128, 256])
+        dropout = trial.suggest_float('dropout', 0.0, 0.3)
+        lr = trial.suggest_float('lr', 1e-4, 5e-3, log=True)
+        weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True)
+        batch_size = trial.suggest_categorical('batch_size', [16, 32, 64])
+        
+        # Prepare Data
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(self.X_train)
+        X_val_scaled = scaler.transform(self.X_val)
+        
+        X_train_seq, y_train_seq = lstm_dataset.create_sequences(X_train_scaled, self.y_train.values, time_steps)
+        X_val_seq, y_val_seq = lstm_dataset.create_sequences(X_val_scaled, self.y_val.values, time_steps)
+        
+        # Check for valid sequences
+        if len(X_train_seq) == 0 or len(X_val_seq) == 0:
+            return float('inf')  # Invalid configuration
+        
+        train_loader = lstm_dataset.prepare_dataloader(X_train_seq, y_train_seq, batch_size=batch_size)
+        
+        # Initialize Model
+        input_dim = X_train_seq.shape[2]
+        model = TransformerModel(
+            input_dim=input_dim,
+            model_dim=model_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout
+        )
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        
+        # Tail-weighted loss parameters
+        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+        tail_alpha = getattr(config, 'BIG_MOVE_ALPHA', 4.0)
+        
+        # Train Loop (Shortened for Tuning)
         epochs = 10
         model.train()
         for epoch in range(epochs):

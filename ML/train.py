@@ -137,6 +137,18 @@ def resolve_deep_settings(model_type, best_params):
             'batch_size': best_params.get('batch_size', config.CNN_BATCH_SIZE),
             'epochs': config.CNN_EPOCHS
         }
+    elif model_type == 'Transformer':
+        return {
+            'model_dim': best_params.get('model_dim', config.TRANSFORMER_MODEL_DIM),
+            'num_heads': best_params.get('num_heads', config.TRANSFORMER_HEADS),
+            'num_layers': best_params.get('num_layers', config.TRANSFORMER_LAYERS),
+            'dim_feedforward': best_params.get('dim_feedforward', config.TRANSFORMER_FEEDFORWARD_DIM),
+            'dropout': best_params.get('dropout', config.TRANSFORMER_DROPOUT),
+            'lr': best_params.get('lr', config.TRANSFORMER_LR),
+            'weight_decay': best_params.get('weight_decay', config.TRANSFORMER_WEIGHT_DECAY),
+            'batch_size': best_params.get('batch_size', config.TRANSFORMER_BATCH_SIZE),
+            'epochs': config.TRANSFORMER_EPOCHS
+        }
     return {}
 
 def main():
@@ -176,7 +188,7 @@ def main():
         tuner = tuning.HyperparameterTuner(config.MODEL_TYPE, X_train, y_train, X_val, y_val)
         best_params = tuner.optimize(n_trials=config.OPTUNA_TRIALS)
             
-    if config.MODEL_TYPE in ['LSTM', 'CNN']:
+    if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
         # --- Deep Learning Training Logic ---
         print(f"Preparing data for {config.MODEL_TYPE}...")
 
@@ -186,18 +198,31 @@ def main():
         X_val_scaled = scaler.transform(X_val)
         X_test_scaled = scaler.transform(X_test)
 
-        # 2. Reshape to 3D Sequences
-        time_steps = config.LSTM_TIME_STEPS
+        # 2. Determine time_steps (from config default or tuned value)
+        if config.MODEL_TYPE == 'LSTM':
+            time_steps = getattr(config, 'LSTM_TIME_STEPS', 10)
+        elif config.MODEL_TYPE == 'CNN':
+            time_steps = getattr(config, 'CNN_TIME_STEPS', 10)
+        elif config.MODEL_TYPE == 'Transformer':
+            time_steps = getattr(config, 'TRANSFORMER_TIME_STEPS', 20)
+        
+        # Override with tuned value if available
+        if best_params and 'time_steps' in best_params:
+            time_steps = best_params['time_steps']
+        
+        print(f"Using time_steps={time_steps} for sequence creation")
+
+        # 3. Reshape to 3D Sequences
         X_train_seq, y_train_seq = lstm_dataset.create_sequences(X_train_scaled, y_train.values, time_steps)
         X_val_seq, y_val_seq = lstm_dataset.create_sequences(X_val_scaled, y_val.values, time_steps)
         X_test_seq, y_test_seq = lstm_dataset.create_sequences(X_test_scaled, y_test.values, time_steps)
 
-        # 3. Create DataLoaders
+        # 4. Create DataLoaders
         deep_settings = resolve_deep_settings(config.MODEL_TYPE, best_params)
         batch_size = deep_settings.get('batch_size', config.LSTM_BATCH_SIZE)
         train_loader = lstm_dataset.prepare_dataloader(X_train_seq, y_train_seq, batch_size=batch_size)
 
-        # 4. Initialize Model
+        # 5. Initialize Model
         input_dim = X_train_seq.shape[2]
         if config.MODEL_TYPE == 'LSTM':
             model = models.LSTMModel(
@@ -207,6 +232,7 @@ def main():
                 dropout=deep_settings['dropout']
             )
             lr = deep_settings['lr']
+            weight_decay = 0
             epochs = deep_settings['epochs']
         elif config.MODEL_TYPE == 'CNN':
             model = models.CNN1DModel(
@@ -217,14 +243,28 @@ def main():
                 dropout=deep_settings['dropout']
             )
             lr = deep_settings['lr']
+            weight_decay = 0
+            epochs = deep_settings['epochs']
+        elif config.MODEL_TYPE == 'Transformer':
+            from ML.transformer import TransformerModel
+            model = TransformerModel(
+                input_dim=input_dim,
+                model_dim=deep_settings['model_dim'],
+                num_heads=deep_settings['num_heads'],
+                num_layers=deep_settings['num_layers'],
+                dim_feedforward=deep_settings['dim_feedforward'],
+                dropout=deep_settings['dropout']
+            )
+            lr = deep_settings['lr']
+            weight_decay = deep_settings['weight_decay']
             epochs = deep_settings['epochs']
 
         # Use tail-weighted MSE loss to emphasize big moves
         big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
-        tail_alpha = getattr(config, 'TAIL_WEIGHT_ALPHA', 4.0)
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        tail_alpha = getattr(config, 'BIG_MOVE_ALPHA', 4.0)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-        # 5. Train Loop
+        # 6. Train Loop
         print(f"Training {config.MODEL_TYPE} for {epochs} epochs (tail-weighted loss, alpha={tail_alpha})...")
         model.train()
         for epoch in range(epochs):
@@ -240,7 +280,7 @@ def main():
             if (epoch+1) % 10 == 0:
                 print(f"Epoch {epoch+1}/{epochs}, Loss: {epoch_loss/len(train_loader):.6f}")
 
-        # 6. Predict (Evaluation)
+        # 7. Predict (Evaluation)
         model.eval()
         with torch.no_grad():
             # Convert Train/Val/Test to tensor
@@ -270,7 +310,7 @@ def main():
         
         # Compute sample weights to emphasize big moves
         big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
-        tail_alpha = getattr(config, 'TAIL_WEIGHT_ALPHA', 4.0)
+        tail_alpha = getattr(config, 'BIG_MOVE_ALPHA', 4.0)
         is_big = (y_train.abs() > big_move_thresh).astype(float)
         sample_weight = 1.0 + tail_alpha * is_big
         

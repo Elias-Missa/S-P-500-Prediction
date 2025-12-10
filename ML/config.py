@@ -10,8 +10,10 @@ QUALITY_REPORT_PATH = os.path.join(REPO_ROOT, 'Output', 'data_quality_report.csv
 # Target Definition
 TARGET_HORIZON = 21  # 1 Month (Trading Days)
 TARGET_COL = 'Target_1M'
-BIG_MOVE_THRESHOLD = 0.03  # 3% threshold for "big move" classification
-TAIL_WEIGHT_ALPHA = 4.0  # Additional weight multiplier for big moves (total weight = 1 + alpha)
+
+# Big-move configuration
+BIG_MOVE_THRESHOLD = 0.03  # 3% 1M move defines a 'big' move for now
+BIG_MOVE_ALPHA = 4.0       # extra weight factor in tail-weighted loss (total weight = 1 + alpha)
 
 # Splitting Parameters
 TEST_START_DATE = '2023-01-01'
@@ -44,7 +46,8 @@ MLP_ALPHA = 0.0001
 MLP_MAX_ITER = 500
 
 # LSTM Params
-LSTM_TIME_STEPS = 10
+LSTM_TIME_STEPS = 10  # default fallback for training if not overridden
+LSTM_LOOKBACK_CANDIDATES = [5, 10, 20, 30, 45, 60]  # Optuna search space
 LSTM_HIDDEN_DIM = 32
 LSTM_LAYERS = 1
 LSTM_EPOCHS = 50
@@ -52,6 +55,8 @@ LSTM_BATCH_SIZE = 32
 LSTM_LEARNING_RATE = 0.001
 
 # CNN Params
+CNN_TIME_STEPS = 10   # default fallback for CNN
+CNN_LOOKBACK_CANDIDATES = [5, 10, 20, 30, 45, 60]  # Optuna search space
 CNN_FILTERS = 64
 CNN_KERNEL_SIZE = 3
 CNN_POOL_SIZE = 2
@@ -60,6 +65,19 @@ CNN_DROPOUT = 0.2
 CNN_EPOCHS = 50
 CNN_BATCH_SIZE = 32
 CNN_LEARNING_RATE = 0.001
+
+# Transformer Params
+TRANSFORMER_TIME_STEPS = 20  # Default time steps for Transformer
+TRANSFORMER_LOOKBACK_CANDIDATES = [10, 20, 30, 45, 60]  # Optuna search space
+TRANSFORMER_MODEL_DIM = 64
+TRANSFORMER_FEEDFORWARD_DIM = 128
+TRANSFORMER_LAYERS = 2
+TRANSFORMER_HEADS = 4
+TRANSFORMER_DROPOUT = 0.1
+TRANSFORMER_EPOCHS = 50
+TRANSFORMER_BATCH_SIZE = 32
+TRANSFORMER_LR = 1e-3
+TRANSFORMER_WEIGHT_DECAY = 1e-4
 
 # Optuna Tuning
 USE_OPTUNA = True

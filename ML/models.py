@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 
 from . import config
+from .transformer import TransformerModel
 
 class ModelFactory:
     @staticmethod
@@ -75,6 +76,18 @@ class ModelFactory:
                 layers=config.CNN_LAYERS,
                 dropout=config.CNN_DROPOUT,
                 output_dim=1
+            )
+        
+        elif model_type == 'Transformer':
+            if input_dim is None:
+                raise ValueError("input_dim must be provided for Transformer")
+            return TransformerModel(
+                input_dim=input_dim,
+                model_dim=config.TRANSFORMER_MODEL_DIM,
+                num_heads=config.TRANSFORMER_HEADS,
+                num_layers=config.TRANSFORMER_LAYERS,
+                dim_feedforward=config.TRANSFORMER_FEEDFORWARD_DIM,
+                dropout=config.TRANSFORMER_DROPOUT
             )
             
         else:
