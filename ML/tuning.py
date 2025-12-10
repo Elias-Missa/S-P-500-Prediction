@@ -4,10 +4,17 @@ import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
 from . import config, models, lstm_dataset
-from .metrics import tail_weighted_mse
+from .metrics import tail_weighted_mse, calculate_tail_metrics
 
 # Suppress Optuna logging to keep output clean
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+
+def _f1_score(precision, recall):
+    """Compute F1 score from precision and recall."""
+    if (precision + recall) == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
 
 class HyperparameterTuner:
     def __init__(self, model_type, X_train, y_train, X_val, y_val):
@@ -37,7 +44,7 @@ class HyperparameterTuner:
             return {}
             
         print(f"Best params: {study.best_params}")
-        print(f"Best MSE: {study.best_value:.6f}")
+        print(f"Best objective (MSE - 0.5*F1): {study.best_value:.6f}")
         return study.best_params
 
     def _objective_lstm(self, trial):
@@ -88,8 +95,18 @@ class HyperparameterTuner:
         # Adjust actuals
         y_val_actual = self.y_val.iloc[time_steps-1:]
         
+        # Compute MSE
         mse = mean_squared_error(y_val_actual, y_pred)
-        return mse
+        
+        # Compute big-move F1 scores
+        tail = calculate_tail_metrics(y_val_actual.values, y_pred, threshold=big_move_thresh)
+        big_f1_up = _f1_score(tail["precision_up_strict"], tail["recall_up_strict"])
+        big_f1_down = _f1_score(tail["precision_down_strict"], tail["recall_down_strict"])
+        
+        # Combined objective: penalize MSE, reward big-move F1
+        # Optuna minimizes, so subtract F1 terms
+        objective = mse - 0.5 * (big_f1_up + big_f1_down)
+        return objective
 
     def _objective_xgboost(self, trial):
         from xgboost import XGBRegressor
@@ -108,8 +125,18 @@ class HyperparameterTuner:
         model.fit(self.X_train, self.y_train)
         y_pred = model.predict(self.X_val)
         
+        # Compute MSE
         mse = mean_squared_error(self.y_val, y_pred)
-        return mse
+        
+        # Compute big-move F1 scores
+        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+        tail = calculate_tail_metrics(self.y_val.values, y_pred, threshold=big_move_thresh)
+        big_f1_up = _f1_score(tail["precision_up_strict"], tail["recall_up_strict"])
+        big_f1_down = _f1_score(tail["precision_down_strict"], tail["recall_down_strict"])
+        
+        # Combined objective: penalize MSE, reward big-move F1
+        objective = mse - 0.5 * (big_f1_up + big_f1_down)
+        return objective
 
     def _objective_random_forest(self, trial):
         from sklearn.ensemble import RandomForestRegressor
@@ -127,8 +154,18 @@ class HyperparameterTuner:
         model.fit(self.X_train, self.y_train)
         y_pred = model.predict(self.X_val)
         
+        # Compute MSE
         mse = mean_squared_error(self.y_val, y_pred)
-        return mse
+        
+        # Compute big-move F1 scores
+        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+        tail = calculate_tail_metrics(self.y_val.values, y_pred, threshold=big_move_thresh)
+        big_f1_up = _f1_score(tail["precision_up_strict"], tail["recall_up_strict"])
+        big_f1_down = _f1_score(tail["precision_down_strict"], tail["recall_down_strict"])
+        
+        # Combined objective: penalize MSE, reward big-move F1
+        objective = mse - 0.5 * (big_f1_up + big_f1_down)
+        return objective
 
     def _objective_mlp(self, trial):
         from sklearn.neural_network import MLPRegressor
@@ -152,8 +189,18 @@ class HyperparameterTuner:
         model.fit(self.X_train, self.y_train)
         y_pred = model.predict(self.X_val)
         
+        # Compute MSE
         mse = mean_squared_error(self.y_val, y_pred)
-        return mse
+        
+        # Compute big-move F1 scores
+        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+        tail = calculate_tail_metrics(self.y_val.values, y_pred, threshold=big_move_thresh)
+        big_f1_up = _f1_score(tail["precision_up_strict"], tail["recall_up_strict"])
+        big_f1_down = _f1_score(tail["precision_down_strict"], tail["recall_down_strict"])
+        
+        # Combined objective: penalize MSE, reward big-move F1
+        objective = mse - 0.5 * (big_f1_up + big_f1_down)
+        return objective
 
     def _objective_cnn(self, trial):
         # Define Search Space
@@ -202,5 +249,16 @@ class HyperparameterTuner:
             y_pred = model(X_val_tensor).numpy().flatten()
             
         y_val_actual = self.y_val.iloc[time_steps-1:]
+        
+        # Compute MSE
         mse = mean_squared_error(y_val_actual, y_pred)
-        return mse
+        
+        # Compute big-move F1 scores
+        tail = calculate_tail_metrics(y_val_actual.values, y_pred, threshold=big_move_thresh)
+        big_f1_up = _f1_score(tail["precision_up_strict"], tail["recall_up_strict"])
+        big_f1_down = _f1_score(tail["precision_down_strict"], tail["recall_down_strict"])
+        
+        # Combined objective: penalize MSE, reward big-move F1
+        # Optuna minimizes, so subtract F1 terms
+        objective = mse - 0.5 * (big_f1_up + big_f1_down)
+        return objective
