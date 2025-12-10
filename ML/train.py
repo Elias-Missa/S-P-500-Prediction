@@ -7,6 +7,7 @@ from ML import config, data_prep, models, utils, metrics, lstm_dataset, tuning
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
+from ML.metrics import tail_weighted_mse
 
 def evaluate(y_true, y_pred, set_name="Val"):
     """
@@ -196,18 +197,20 @@ def main():
             lr = deep_settings['lr']
             epochs = deep_settings['epochs']
 
-        criterion = nn.MSELoss()
+        # Use tail-weighted MSE loss to emphasize big moves
+        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+        tail_alpha = getattr(config, 'TAIL_WEIGHT_ALPHA', 4.0)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
         # 5. Train Loop
-        print(f"Training {config.MODEL_TYPE} for {epochs} epochs...")
+        print(f"Training {config.MODEL_TYPE} for {epochs} epochs (tail-weighted loss, alpha={tail_alpha})...")
         model.train()
         for epoch in range(epochs):
             epoch_loss = 0
             for X_batch, y_batch in train_loader:
                 optimizer.zero_grad()
                 outputs = model(X_batch)
-                loss = criterion(outputs, y_batch)
+                loss = tail_weighted_mse(outputs, y_batch, threshold=big_move_thresh, alpha=tail_alpha)
                 loss.backward()
                 optimizer.step()
                 epoch_loss += loss.item()
@@ -242,7 +245,22 @@ def main():
         # --- Standard ML Training ---
         model_params = resolve_model_params(config.MODEL_TYPE, best_params)
         model = models.ModelFactory.get_model(config.MODEL_TYPE, overrides=model_params)
-        model.fit(X_train, y_train)
+        
+        # Compute sample weights to emphasize big moves
+        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+        tail_alpha = getattr(config, 'TAIL_WEIGHT_ALPHA', 4.0)
+        is_big = (y_train.abs() > big_move_thresh).astype(float)
+        sample_weight = 1.0 + tail_alpha * is_big
+        
+        n_big = int(is_big.sum())
+        print(f"Sample weighting: {n_big} big moves ({100*n_big/len(y_train):.1f}%) get {1+tail_alpha}x weight")
+        
+        # Try to fit with sample_weight; fall back if not supported
+        try:
+            model.fit(X_train, y_train, sample_weight=sample_weight)
+        except TypeError:
+            print(f"Note: {config.MODEL_TYPE} does not support sample_weight, fitting without weights.")
+            model.fit(X_train, y_train)
         
         y_train_pred = model.predict(X_train)
         y_val_pred = model.predict(X_val)

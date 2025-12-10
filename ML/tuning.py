@@ -4,6 +4,7 @@ import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
 from . import config, models, lstm_dataset
+from .metrics import tail_weighted_mse
 
 # Suppress Optuna logging to keep output clean
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -61,8 +62,11 @@ class HyperparameterTuner:
         # Initialize Model
         input_dim = X_train_seq.shape[2]
         model = models.LSTMModel(input_dim, hidden_dim, num_layers, dropout=dropout)
-        criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        
+        # Tail-weighted loss parameters
+        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+        tail_alpha = getattr(config, 'TAIL_WEIGHT_ALPHA', 4.0)
         
         # Train Loop (Shortened for Tuning)
         epochs = 10 # Fewer epochs for tuning speed
@@ -71,7 +75,7 @@ class HyperparameterTuner:
             for X_batch, y_batch in train_loader:
                 optimizer.zero_grad()
                 outputs = model(X_batch)
-                loss = criterion(outputs, y_batch)
+                loss = tail_weighted_mse(outputs, y_batch, threshold=big_move_thresh, alpha=tail_alpha)
                 loss.backward()
                 optimizer.step()
         
@@ -174,8 +178,11 @@ class HyperparameterTuner:
         # Initialize Model
         input_dim = X_train_seq.shape[2]
         model = models.CNN1DModel(input_dim, filters, kernel_size, layers, dropout=dropout)
-        criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        
+        # Tail-weighted loss parameters
+        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+        tail_alpha = getattr(config, 'TAIL_WEIGHT_ALPHA', 4.0)
         
         # Train Loop
         epochs = 10
@@ -184,7 +191,7 @@ class HyperparameterTuner:
             for X_batch, y_batch in train_loader:
                 optimizer.zero_grad()
                 outputs = model(X_batch)
-                loss = criterion(outputs, y_batch)
+                loss = tail_weighted_mse(outputs, y_batch, threshold=big_move_thresh, alpha=tail_alpha)
                 loss.backward()
                 optimizer.step()
         

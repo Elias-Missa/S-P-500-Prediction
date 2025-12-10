@@ -1,6 +1,29 @@
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
+import torch
+
+
+def tail_weighted_mse(y_pred, y_true, threshold=0.03, alpha=4.0):
+    """
+    Tail-weighted MSE loss for PyTorch models.
+    
+    Applies higher weight to samples where the actual return exceeds
+    the threshold, making the model focus more on big moves.
+    
+    Args:
+        y_pred: Predicted values tensor of shape (batch_size, 1) or (batch_size,)
+        y_true: Actual values tensor of shape (batch_size, 1) or (batch_size,)
+        threshold: Absolute return threshold that defines a 'big' move
+        alpha: Additional weight multiplier applied to big moves
+               (total weight for big moves = 1 + alpha)
+    
+    Returns:
+        Scalar tensor with the weighted MSE loss
+    """
+    diff = y_pred - y_true
+    weights = 1.0 + alpha * (y_true.abs() > threshold).float()
+    return (weights * diff.pow(2)).mean()
 
 def calculate_ic(y_true, y_pred):
     """

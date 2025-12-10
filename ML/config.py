@@ -11,6 +11,7 @@ QUALITY_REPORT_PATH = os.path.join(REPO_ROOT, 'Output', 'data_quality_report.csv
 TARGET_HORIZON = 21  # 1 Month (Trading Days)
 TARGET_COL = 'Target_1M'
 BIG_MOVE_THRESHOLD = 0.03  # 3% threshold for "big move" classification
+TAIL_WEIGHT_ALPHA = 4.0  # Additional weight multiplier for big moves (total weight = 1 + alpha)
 
 # Splitting Parameters
 TEST_START_DATE = '2023-01-01'
