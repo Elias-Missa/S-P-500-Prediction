@@ -285,8 +285,8 @@ class HyperparameterTuner:
         num_layers = trial.suggest_int('num_layers', 1, 4)
         dim_feedforward = trial.suggest_categorical('dim_feedforward', [64, 128, 256])
         dropout = trial.suggest_float('dropout', 0.0, 0.3)
-        lr = trial.suggest_float('lr', 1e-4, 5e-3, log=True)
-        weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True)
+        lr = trial.suggest_float('lr', 1e-4, 1e-3, log=True)  # Narrower, safer range
+        weight_decay = trial.suggest_float('weight_decay', 1e-5, 1e-3, log=True)
         batch_size = trial.suggest_categorical('batch_size', [16, 32, 64])
         
         # Prepare Data
@@ -328,6 +328,8 @@ class HyperparameterTuner:
                 outputs = model(X_batch)
                 loss = tail_weighted_mse(outputs, y_batch, threshold=big_move_thresh, alpha=tail_alpha)
                 loss.backward()
+                # Gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
         
         # Evaluate

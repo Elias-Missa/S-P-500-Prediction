@@ -24,7 +24,7 @@ BUFFER_DAYS = 21  # Embargo period to prevent leakage (should be >= TARGET_HORIZ
 
 # Model Parameters
 # Options: 'LinearRegression', 'RandomForest', 'XGBoost', 'MLP', 'LSTM', 'CNN'
-MODEL_TYPE = 'CNN'
+MODEL_TYPE = 'Transformer'
 BASIC_MODEL_SUITE = ['LinearRegression', 'RandomForest', 'XGBoost', 'MLP']
 
 # Random Forest Params
@@ -76,7 +76,7 @@ TRANSFORMER_HEADS = 4
 TRANSFORMER_DROPOUT = 0.1
 TRANSFORMER_EPOCHS = 50
 TRANSFORMER_BATCH_SIZE = 32
-TRANSFORMER_LR = 1e-3
+TRANSFORMER_LR = 5e-4  # Conservative LR for stability
 TRANSFORMER_WEIGHT_DECAY = 1e-4
 
 # Optuna Tuning

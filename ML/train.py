@@ -169,9 +169,10 @@ def main():
     
     train_idx, val_idx, test_idx = splitter.get_split(df)
     
-    # Features and Target
+    # Features and Target (exclude BigMove labels to prevent target leakage)
     target_col = config.TARGET_COL
-    feature_cols = [c for c in df.columns if c != target_col]
+    exclude_cols = [target_col, 'BigMove', 'BigMoveUp', 'BigMoveDown']
+    feature_cols = [c for c in df.columns if c not in exclude_cols]
     
     X_train, y_train = df.loc[train_idx, feature_cols], df.loc[train_idx, target_col]
     X_val, y_val = df.loc[val_idx, feature_cols], df.loc[val_idx, target_col]
@@ -263,6 +264,19 @@ def main():
         big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
         tail_alpha = getattr(config, 'BIG_MOVE_ALPHA', 4.0)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        
+        # Learning rate warmup scheduler for Transformer stability
+        scheduler = None
+        if config.MODEL_TYPE == 'Transformer':
+            warmup_epochs = 5
+            warmup_steps = len(train_loader) * warmup_epochs
+            step_count = [0]  # Use list to allow mutation in closure
+            def lr_lambda(step):
+                step_count[0] += 1
+                if step_count[0] < warmup_steps:
+                    return float(step_count[0]) / float(max(1, warmup_steps))
+                return 1.0
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
         # 6. Train Loop
         print(f"Training {config.MODEL_TYPE} for {epochs} epochs (tail-weighted loss, alpha={tail_alpha})...")
@@ -274,7 +288,11 @@ def main():
                 outputs = model(X_batch)
                 loss = tail_weighted_mse(outputs, y_batch, threshold=big_move_thresh, alpha=tail_alpha)
                 loss.backward()
+                # Gradient clipping for stability (especially important for Transformer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
                 epoch_loss += loss.item()
 
             if (epoch+1) % 10 == 0:

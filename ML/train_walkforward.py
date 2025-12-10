@@ -30,8 +30,10 @@ def main():
         train_start_date=config.TRAIN_START_DATE
     )
     
+    # Exclude BigMove labels to prevent target leakage
     target_col = config.TARGET_COL
-    feature_cols = [c for c in df.columns if c != target_col]
+    exclude_cols = [target_col, 'BigMove', 'BigMoveUp', 'BigMoveDown']
+    feature_cols = [c for c in df.columns if c not in exclude_cols]
     
     all_preds = []
     all_actuals = []
@@ -113,6 +115,8 @@ def main():
                     outputs = model(X_batch)
                     loss = tail_weighted_mse(outputs, y_batch, threshold=big_move_thresh, alpha=tail_alpha)
                     loss.backward()
+                    # Gradient clipping for stability
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
             
             # 6. Predict
