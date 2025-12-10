@@ -2,6 +2,11 @@ import pandas as pd
 import numpy as np
 from . import config
 
+
+def get_big_move_threshold():
+    """Get the big move threshold from config, defaulting to 3%."""
+    return getattr(config, "BIG_MOVE_THRESHOLD", 0.03)
+
 def load_and_prep_data():
     """
     Loads data, creates target, and handles basic cleaning.
@@ -45,6 +50,25 @@ def load_and_prep_data():
 
     # Drop any remaining rows that still include gaps
     df.dropna(inplace=True)
+
+    # --- Create Big Move Labels ---
+    # These are derived purely from Target_1M (which is already shifted forward),
+    # so no additional lookahead is introduced.
+    big_move_thresh = get_big_move_threshold()
+    y = df[config.TARGET_COL]
+    
+    df["BigMove"] = (y.abs() > big_move_thresh).astype(int)
+    df["BigMoveUp"] = (y > big_move_thresh).astype(int)
+    df["BigMoveDown"] = (y < -big_move_thresh).astype(int)
+    
+    # Log big move statistics
+    n_big_move = df["BigMove"].sum()
+    n_big_up = df["BigMoveUp"].sum()
+    n_big_down = df["BigMoveDown"].sum()
+    pct_big_move = 100.0 * n_big_move / len(df)
+    print(f"Big Move Labels (threshold={big_move_thresh:.1%}):")
+    print(f"  Total BigMoves: {n_big_move} ({pct_big_move:.1f}% of data)")
+    print(f"  BigMoveUp: {n_big_up}, BigMoveDown: {n_big_down}")
 
     print(f"Data loaded: {len(df)} rows. Columns: {len(df.columns)}")
     return df
