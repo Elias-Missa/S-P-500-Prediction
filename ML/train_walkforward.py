@@ -53,7 +53,12 @@ def main():
     if time_steps is not None:
         print(f"Using time_steps={time_steps} for sequence creation")
     
-    for fold, train_idx, val_idx, test_idx in splitter.split(df):
+    # Materialize splits so we can report progress and counts
+    splits = list(splitter.split(df))
+    total_folds = len(splits)
+    
+    for fold, train_idx, val_idx, test_idx in splits:
+        print(f"\n=== Fold {fold+1}/{total_folds} ===")
         # Prepare Data
         X_train, y_train = df.loc[train_idx, feature_cols], df.loc[train_idx, target_col]
         # X_val, y_val = df.loc[val_idx, feature_cols], df.loc[val_idx, target_col] # Can use for early stopping
@@ -107,17 +112,39 @@ def main():
             tail_alpha = getattr(config, 'BIG_MOVE_ALPHA', 4.0)
             optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
             
+            # Learning rate warmup scheduler for Transformer stability
+            scheduler = None
+            if config.MODEL_TYPE == 'Transformer':
+                warmup_epochs = 5
+                warmup_steps = len(train_loader) * warmup_epochs
+                step_count = [0]  # Use list to allow mutation in closure
+                def lr_lambda(step):
+                    step_count[0] += 1
+                    if step_count[0] < warmup_steps:
+                        return float(step_count[0]) / float(max(1, warmup_steps))
+                    return 1.0
+                scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+            
             # 5. Train Loop
             model.train()
             for epoch in range(epochs):
+                epoch_loss = 0.0
                 for X_batch, y_batch in train_loader:
                     optimizer.zero_grad()
                     outputs = model(X_batch)
                     loss = tail_weighted_mse(outputs, y_batch, threshold=big_move_thresh, alpha=tail_alpha)
                     loss.backward()
-                    # Gradient clipping for stability
+                    # Gradient clipping for stability (especially important for Transformer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
+                    if scheduler is not None:
+                        scheduler.step()
+                    epoch_loss += loss.item()
+                
+                # Lightweight progress logging
+                if (epoch + 1) % max(1, epochs // 5) == 0 or epoch == 0:
+                    avg_loss = epoch_loss / max(1, len(train_loader))
+                    print(f"  Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.6f}")
             
             # 6. Predict
             model.eval()
