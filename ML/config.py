@@ -82,3 +82,16 @@ TRANSFORMER_WEIGHT_DECAY = 1e-4
 # Optuna Tuning
 USE_OPTUNA = True
 OPTUNA_TRIALS = 20
+
+# Hyperparameter tuning (walk-forward CV) configuration
+# These settings control how deep models (LSTM, CNN, Transformer) are tuned
+# using multiple walk-forward folds to avoid regime overfitting
+TUNE_START_DATE = "2012-01-01"   # where tuning folds start
+TUNE_END_DATE = "2022-12-31"     # last date used for tuning folds
+
+TUNE_TRAIN_YEARS = 5             # years of training per fold
+TUNE_VAL_MONTHS = 6              # validation window length (months)
+TUNE_STEP_MONTHS = 6             # step between folds (months)
+TUNE_BUFFER_DAYS = 21            # embargo between train/val, similar to BUFFER_DAYS
+TUNE_MAX_FOLDS = 10              # maximum number of folds to use (for speed)
+TUNE_EPOCHS = 15                 # reduced epochs per fold during tuning

@@ -186,8 +186,46 @@ def main():
     # --- Optuna Tuning ---
     best_params = {}
     if config.USE_OPTUNA:
-        tuner = tuning.HyperparameterTuner(config.MODEL_TYPE, X_train, y_train, X_val, y_val)
+        # For deep models, pass full data to enable walk-forward CV during tuning
+        # This avoids regime overfitting by evaluating hyperparameters across multiple folds
+        if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
+            full_X = df[feature_cols]
+            full_y = df[target_col]
+            tuner = tuning.HyperparameterTuner(
+                config.MODEL_TYPE, X_train, y_train, X_val, y_val,
+                full_X=full_X, full_y=full_y
+            )
+        else:
+            tuner = tuning.HyperparameterTuner(config.MODEL_TYPE, X_train, y_train, X_val, y_val)
         best_params = tuner.optimize(n_trials=config.OPTUNA_TRIALS)
+        
+        # Record tuning metadata for logging
+        if hasattr(logger, "set_tuning_info"):
+            if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
+                # Deep models use walk-forward CV
+                n_folds = tuner.get_tuning_fold_count()
+                logger.set_tuning_info(
+                    method="WalkForward CV (multiple folds across tuning window)",
+                    n_folds=n_folds,
+                    tune_start_date=getattr(config, 'TUNE_START_DATE', None),
+                    tune_end_date=getattr(config, 'TUNE_END_DATE', None),
+                    n_trials=config.OPTUNA_TRIALS,
+                )
+            else:
+                # Basic models use static single split
+                logger.set_tuning_info(
+                    method="Static (single train/val split)",
+                    n_folds=1,
+                    tune_start_date=str(X_train.index.min().date()) if hasattr(X_train.index, "min") else None,
+                    tune_end_date=str(X_val.index.max().date()) if hasattr(X_val.index, "max") else None,
+                    n_trials=config.OPTUNA_TRIALS,
+                )
+    else:
+        if hasattr(logger, "set_tuning_info"):
+            logger.set_tuning_info(
+                method="None (no hyperparameter tuning)",
+                n_trials=0,
+            )
             
     if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
         # --- Deep Learning Training Logic ---

@@ -14,6 +14,8 @@ class ExperimentLogger:
             os.makedirs(self.base_dir)
             
         self.process_tag = process_tag
+        self.model_name = model_name
+        self.tuning_info = None  # will hold metadata about hyperparameter tuning
             
         # Determine Run Number (Ordinal)
         # Scan existing folders to count how many times this model has been run
@@ -39,6 +41,29 @@ class ExperimentLogger:
         os.makedirs(self.run_dir)
         
         print(f"Experiment logging to: {self.run_dir}")
+    
+    def set_tuning_info(self, method: str, n_folds: int = None,
+                        tune_start_date: str = None, tune_end_date: str = None,
+                        n_trials: int = None):
+        """
+        Record metadata about how hyperparameters were tuned, so it can be
+        included in the markdown summary.
+
+        Args:
+            method: Description of tuning method, e.g. "None", "Static (single train/val split)",
+                    "WalkForward CV", etc.
+            n_folds: Number of CV folds used (if applicable).
+            tune_start_date: Start date of tuning data window (if applicable).
+            tune_end_date: End date of tuning data window (if applicable).
+            n_trials: Number of Optuna trials run (if applicable).
+        """
+        self.tuning_info = {
+            "method": method,
+            "n_folds": n_folds,
+            "tune_start_date": tune_start_date,
+            "tune_end_date": tune_end_date,
+            "n_trials": n_trials,
+        }
         
     def log_summary(self, metrics_train, metrics_val, metrics_test, model_type, feature_cols):
         """
@@ -59,6 +84,26 @@ class ExperimentLogger:
                 f.write("> **Static Validation**: The model is trained *once* on a fixed historical period (e.g., 2017-2022) and tested on a subsequent unseen period (e.g., 2023-Present). This mimics a 'set and forget' approach and tests how well a single model generalizes over time without retraining.\n\n")
             elif "WalkForward" in self.run_dir:
                 f.write("> **Walk-Forward Validation**: The model is retrained periodically (e.g., every month) as new data becomes available. This mimics a real-world trading strategy where the model adapts to recent market regimes. It is generally more robust but computationally expensive.\n\n")
+            
+            # 1b. Hyperparameter Tuning
+            f.write("## Hyperparameter Tuning\n")
+            if self.tuning_info is None:
+                f.write("> No hyperparameter tuning information was recorded for this run.\n\n")
+            else:
+                method = self.tuning_info.get("method", "Unknown")
+                n_folds = self.tuning_info.get("n_folds")
+                tune_start = self.tuning_info.get("tune_start_date")
+                tune_end = self.tuning_info.get("tune_end_date")
+                n_trials = self.tuning_info.get("n_trials")
+
+                f.write(f"- **Method**: {method}\n")
+                if n_folds is not None:
+                    f.write(f"- **CV Folds**: {n_folds}\n")
+                if tune_start or tune_end:
+                    f.write(f"- **Tuning Data Window**: {tune_start or 'N/A'} → {tune_end or 'N/A'}\n")
+                if n_trials is not None:
+                    f.write(f"- **Optuna Trials**: {n_trials}\n")
+                f.write("\n")
             
             f.write("## Configuration\n")
             f.write(f"- **Model**: `{model_type}`\n")
