@@ -1,10 +1,49 @@
 import os
 import datetime
 import shutil
+import torch
+import torch.nn.functional as F
 from . import config
 
+
+def compute_loss(y_pred, y_true, loss_mode="mse",
+                 huber_delta=1.0,
+                 tail_alpha=4.0,
+                 tail_threshold=0.03):
+    """
+    Unified loss function for deep models.
+
+    Args:
+        y_pred: Tensor of predictions
+        y_true: Tensor of true targets
+        loss_mode: "mse", "huber", or "tail_weighted"
+        huber_delta: Delta for Huber loss (only used if loss_mode == "huber")
+        tail_alpha: Extra weight for tail samples (only used if loss_mode == "tail_weighted")
+        tail_threshold: Threshold for tail samples (only used if loss_mode == "tail_weighted")
+    
+    Returns:
+        Scalar loss tensor
+    """
+    if loss_mode == "mse":
+        return F.mse_loss(y_pred, y_true)
+
+    elif loss_mode == "huber":
+        return F.huber_loss(y_pred, y_true, delta=huber_delta)
+
+    elif loss_mode == "tail_weighted":
+        diff = y_pred - y_true
+        base_loss = diff.pow(2)
+
+        tail_mask = (y_true.abs() > tail_threshold).float()
+        weights = 1.0 + tail_alpha * tail_mask
+
+        return (weights * base_loss).mean()
+
+    else:
+        raise ValueError(f"Unknown LOSS_MODE: {loss_mode}")
+
 class ExperimentLogger:
-    def __init__(self, model_name="Model", process_tag="Static"):
+    def __init__(self, model_name="Model", process_tag="Static", loss_tag=None):
         # Create base ML_Output directory
         # Use config.REPO_ROOT if available, or calculate it locally to be safe
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,6 +54,7 @@ class ExperimentLogger:
             
         self.process_tag = process_tag
         self.model_name = model_name
+        self.loss_tag = loss_tag  # e.g., "MSE", "HUBER", "TAIL_WEIGHTED"
         self.tuning_info = None  # will hold metadata about hyperparameter tuning
             
         # Determine Run Number (Ordinal)
@@ -33,9 +73,12 @@ class ExperimentLogger:
         # Date Format: Month-Day-Year (e.g., 12-04-2025)
         date_str = datetime.datetime.now().strftime("%m-%d-%Y_%H-%M")
         
-        # Construct Folder Name: e.g., MLP_1st_12-04-2025_12-46
-        # Adding process_tag (Static/WalkForward) to clarify what kind of run it was
-        folder_name = f"{model_name}_{run_ordinal}_{process_tag}_{date_str}"
+        # Construct Folder Name: e.g., MLP_1st_Static_MSE_12-04-2025_12-46
+        # Adding process_tag (Static/WalkForward) and loss_tag to clarify what kind of run it was
+        if loss_tag:
+            folder_name = f"{model_name}_{run_ordinal}_{process_tag}_{loss_tag}_{date_str}"
+        else:
+            folder_name = f"{model_name}_{run_ordinal}_{process_tag}_{date_str}"
         
         self.run_dir = os.path.join(self.base_dir, folder_name)
         os.makedirs(self.run_dir)
@@ -108,10 +151,36 @@ class ExperimentLogger:
             f.write("## Configuration\n")
             f.write(f"- **Model**: `{model_type}`\n")
             f.write(f"- **Target Horizon**: {config.TARGET_HORIZON} days (Predicting return 1 month ahead)\n")
-            f.write(f"- **Train Window**: {config.TRAIN_WINDOW_YEARS} years\n")
-            f.write(f"- **Val Window**: {config.VAL_WINDOW_MONTHS} months\n")
-            f.write(f"- **Buffer**: {config.BUFFER_DAYS} days (Embargo to prevent leakage)\n")
-            f.write(f"- **Test Start**: {config.TEST_START_DATE}\n\n")
+            
+            # Check if this is a walk-forward run
+            is_walkforward = (process_tag == "WalkForward" or "WalkForward" in self.run_dir)
+            
+            if is_walkforward:
+                # Walk-forward specific configuration
+                f.write(f"- **Train Window**: {config.TRAIN_WINDOW_YEARS} years\n")
+                f.write(f"- **Val Window**: {config.WF_VAL_MONTHS} months\n")
+                f.write(f"- **Buffer**: {config.BUFFER_DAYS} days (Embargo to prevent leakage)\n")
+                f.write(f"- **Test Start**: {config.TEST_START_DATE}\n")
+                f.write(f"- **Train on Train+Val**: {config.WF_TRAIN_ON_TRAIN_PLUS_VAL}\n")
+                f.write(f"- **Use Tuned Params**: {config.WF_USE_TUNED_PARAMS}\n")
+            else:
+                # Static validation configuration
+                f.write(f"- **Train Window**: {config.TRAIN_WINDOW_YEARS} years\n")
+                f.write(f"- **Val Window**: {config.VAL_WINDOW_MONTHS} months\n")
+                f.write(f"- **Buffer**: {config.BUFFER_DAYS} days (Embargo to prevent leakage)\n")
+                f.write(f"- **Test Start**: {config.TEST_START_DATE}\n")
+            f.write("\n")
+            
+            # Training Loss section
+            f.write("## Training Loss\n")
+            loss_mode = getattr(config, 'LOSS_MODE', 'mse')
+            f.write(f"- **Loss Mode**: {loss_mode}\n")
+            if loss_mode == "huber":
+                f.write(f"- **Huber Delta**: {config.HUBER_DELTA}\n")
+            if loss_mode == "tail_weighted":
+                f.write(f"- **Tail Alpha**: {config.TAIL_ALPHA}\n")
+                f.write(f"- **Tail Threshold**: {config.TAIL_THRESHOLD}\n")
+            f.write("\n")
             
             f.write("## Model Description\n")
             if model_type == 'XGBoost':

@@ -7,7 +7,6 @@ from ML import config, data_prep, models, utils, metrics, lstm_dataset, tuning
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
-from ML.metrics import tail_weighted_mse
 
 def evaluate(y_true, y_pred, set_name="Val"):
     """
@@ -152,8 +151,9 @@ def resolve_deep_settings(model_type, best_params):
     return {}
 
 def main():
-    # Initialize Logger
-    logger = utils.ExperimentLogger(model_name=config.MODEL_TYPE, process_tag="Static")
+    # Initialize Logger with loss mode tag
+    loss_tag = config.LOSS_MODE.upper()
+    logger = utils.ExperimentLogger(model_name=config.MODEL_TYPE, process_tag="Static", loss_tag=loss_tag)
 
     # 1. Load Data
     df = data_prep.load_and_prep_data()
@@ -298,9 +298,11 @@ def main():
             weight_decay = deep_settings['weight_decay']
             epochs = deep_settings['epochs']
 
-        # Use tail-weighted MSE loss to emphasize big moves
-        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
-        tail_alpha = getattr(config, 'BIG_MOVE_ALPHA', 4.0)
+        # Loss function configuration
+        loss_mode = config.LOSS_MODE
+        huber_delta = getattr(config, 'HUBER_DELTA', 1.0)
+        tail_alpha = getattr(config, 'TAIL_ALPHA', 4.0)
+        tail_threshold = getattr(config, 'TAIL_THRESHOLD', 0.03)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
         
         # Learning rate warmup scheduler for Transformer stability
@@ -317,14 +319,21 @@ def main():
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
         # 6. Train Loop
-        print(f"Training {config.MODEL_TYPE} for {epochs} epochs (tail-weighted loss, alpha={tail_alpha})...")
+        print(f"Training {config.MODEL_TYPE} for {epochs} epochs (loss_mode={loss_mode})...")
         model.train()
         for epoch in range(epochs):
             epoch_loss = 0
             for X_batch, y_batch in train_loader:
                 optimizer.zero_grad()
                 outputs = model(X_batch)
-                loss = tail_weighted_mse(outputs, y_batch, threshold=big_move_thresh, alpha=tail_alpha)
+                loss = utils.compute_loss(
+                    y_pred=outputs,
+                    y_true=y_batch,
+                    loss_mode=loss_mode,
+                    huber_delta=huber_delta,
+                    tail_alpha=tail_alpha,
+                    tail_threshold=tail_threshold
+                )
                 loss.backward()
                 # Gradient clipping for stability (especially important for Transformer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

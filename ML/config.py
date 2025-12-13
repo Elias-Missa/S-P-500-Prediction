@@ -102,3 +102,11 @@ WF_TRAIN_ON_TRAIN_PLUS_VAL = True  # if val_months > 0, merge train+val into tra
 WF_USE_TUNED_PARAMS = False
 WF_BEST_PARAMS_PATH = None       # e.g., "Output/best_params_transformer.json"
 WF_GRAD_CLIP_NORM = 1.0
+
+# ===============================
+# Loss Function Configuration
+# ===============================
+LOSS_MODE = "mse"               # Options: "mse", "huber", "tail_weighted"
+HUBER_DELTA = 1.0               # Used only if LOSS_MODE == "huber"
+TAIL_ALPHA = 4.0                # Used only if LOSS_MODE == "tail_weighted"
+TAIL_THRESHOLD = 0.03           # Absolute return threshold for big moves

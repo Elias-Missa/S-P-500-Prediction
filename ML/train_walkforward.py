@@ -9,11 +9,11 @@ from ML import config, data_prep, models, utils, metrics, lstm_dataset
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
-from ML.metrics import tail_weighted_mse
 
 def main():
-    # Initialize Logger
-    logger = utils.ExperimentLogger(model_name=config.MODEL_TYPE, process_tag="WalkForward")
+    # Initialize Logger with loss mode tag
+    loss_tag = config.LOSS_MODE.upper()
+    logger = utils.ExperimentLogger(model_name=config.MODEL_TYPE, process_tag="WalkForward", loss_tag=loss_tag)
     
     print("--- Walk-Forward Validation ---")
     
@@ -37,25 +37,54 @@ def main():
         if os.path.exists(config.WF_BEST_PARAMS_PATH):
             with open(config.WF_BEST_PARAMS_PATH, 'r') as f:
                 tuned = json.load(f)
-            print(f"Loaded tuned params from {config.WF_BEST_PARAMS_PATH}:")
-            print(f"  {tuned}")
-            # Override Transformer params
+            print(f"Loaded tuned params from {config.WF_BEST_PARAMS_PATH}")
+            
+            # Override Transformer params - support Optuna keys with backward compatibility
+            # Prefer Optuna keys (num_heads, num_layers, dim_feedforward) over old keys (heads, layers, ff_dim)
             if 'model_dim' in tuned:
                 config.TRANSFORMER_MODEL_DIM = tuned['model_dim']
-            if 'heads' in tuned:
+            
+            # num_heads (Optuna) or heads (backward compat)
+            if 'num_heads' in tuned:
+                config.TRANSFORMER_HEADS = tuned['num_heads']
+            elif 'heads' in tuned:
                 config.TRANSFORMER_HEADS = tuned['heads']
-            if 'layers' in tuned:
+            
+            # num_layers (Optuna) or layers (backward compat)
+            if 'num_layers' in tuned:
+                config.TRANSFORMER_LAYERS = tuned['num_layers']
+            elif 'layers' in tuned:
                 config.TRANSFORMER_LAYERS = tuned['layers']
-            if 'ff_dim' in tuned:
+            
+            # dim_feedforward (Optuna) or ff_dim (backward compat)
+            if 'dim_feedforward' in tuned:
+                config.TRANSFORMER_FEEDFORWARD_DIM = tuned['dim_feedforward']
+            elif 'ff_dim' in tuned:
                 config.TRANSFORMER_FEEDFORWARD_DIM = tuned['ff_dim']
+            
             if 'dropout' in tuned:
                 config.TRANSFORMER_DROPOUT = tuned['dropout']
             if 'lr' in tuned:
                 config.TRANSFORMER_LR = tuned['lr']
             if 'weight_decay' in tuned:
                 config.TRANSFORMER_WEIGHT_DECAY = tuned['weight_decay']
+            if 'batch_size' in tuned:
+                config.TRANSFORMER_BATCH_SIZE = tuned['batch_size']
             if 'time_steps' in tuned:
                 config.TRANSFORMER_TIME_STEPS = tuned['time_steps']
+            
+            # Print final overrides in a clean format
+            print("\n--- Final Transformer Overrides ---")
+            print(f"  model_dim:        {config.TRANSFORMER_MODEL_DIM}")
+            print(f"  num_heads:        {config.TRANSFORMER_HEADS}")
+            print(f"  num_layers:       {config.TRANSFORMER_LAYERS}")
+            print(f"  dim_feedforward:  {config.TRANSFORMER_FEEDFORWARD_DIM}")
+            print(f"  dropout:          {config.TRANSFORMER_DROPOUT}")
+            print(f"  lr:               {config.TRANSFORMER_LR}")
+            print(f"  weight_decay:    {config.TRANSFORMER_WEIGHT_DECAY}")
+            print(f"  batch_size:       {config.TRANSFORMER_BATCH_SIZE}")
+            print(f"  time_steps:       {config.TRANSFORMER_TIME_STEPS}")
+            print("---\n")
         else:
             print(f"Warning: WF_BEST_PARAMS_PATH '{config.WF_BEST_PARAMS_PATH}' not found. Using defaults.")
     
@@ -102,21 +131,29 @@ def main():
         # Train
         if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
             # --- Deep Learning Training Logic ---
-            # 1. Scale Data (Fit on Train, Transform on Test)
+            # 1. Standardize target per fold for stability
+            y_mean = y_train.mean()
+            y_std = y_train.std()
+            if y_std == 0:
+                y_std = 1.0
+            y_train_scaled = (y_train - y_mean) / y_std
+            y_test_scaled = (y_test - y_mean) / y_std
+            
+            # 2. Scale Features (Fit on Train, Transform on Test)
             scaler = StandardScaler()
             X_train_scaled = scaler.fit_transform(X_train)
             X_test_scaled = scaler.transform(X_test)
             
-            # 2. Reshape to 3D Sequences
-            X_train_seq, y_train_seq = lstm_dataset.create_sequences(X_train_scaled, y_train.values, time_steps)
-            X_test_seq, y_test_seq = lstm_dataset.create_sequences(X_test_scaled, y_test.values, time_steps)
+            # 3. Reshape to 3D Sequences (using scaled targets)
+            X_train_seq, y_train_seq = lstm_dataset.create_sequences(X_train_scaled, y_train_scaled.values, time_steps)
+            X_test_seq, y_test_seq = lstm_dataset.create_sequences(X_test_scaled, y_test_scaled.values, time_steps)
             
             # Check if sequences are empty (e.g. if fold is too small)
             if len(X_train_seq) == 0 or len(X_test_seq) == 0:
                 print(f"Fold {fold}: Skipping due to insufficient data for sequence generation.")
                 continue
             
-            # 3. Create DataLoader
+            # 4. Create DataLoader
             if config.MODEL_TYPE == 'LSTM':
                 batch_size = config.LSTM_BATCH_SIZE
             elif config.MODEL_TYPE == 'CNN':
@@ -125,7 +162,7 @@ def main():
                 batch_size = config.TRANSFORMER_BATCH_SIZE
             train_loader = lstm_dataset.prepare_dataloader(X_train_seq, y_train_seq, batch_size=batch_size)
             
-            # 4. Initialize Model
+            # 5. Initialize Model
             input_dim = X_train_seq.shape[2]
             weight_decay = 0
             if config.MODEL_TYPE == 'LSTM':
@@ -142,9 +179,12 @@ def main():
                 weight_decay = config.TRANSFORMER_WEIGHT_DECAY
                 epochs = config.TRANSFORMER_EPOCHS
             
-            # Tail-weighted loss parameters
-            big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
-            tail_alpha = getattr(config, 'BIG_MOVE_ALPHA', 4.0)
+            # Loss function configuration (scale threshold for scaled targets)
+            loss_mode = config.LOSS_MODE
+            huber_delta = getattr(config, 'HUBER_DELTA', 1.0)
+            tail_alpha = getattr(config, 'TAIL_ALPHA', 4.0)
+            tail_threshold_raw = getattr(config, 'TAIL_THRESHOLD', 0.03)
+            tail_threshold_scaled = tail_threshold_raw / y_std  # Scale threshold for scaled targets
             optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
             
             # Learning rate warmup scheduler for Transformer stability
@@ -160,14 +200,21 @@ def main():
                     return 1.0
                 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
             
-            # 5. Train Loop
+            # 6. Train Loop
             model.train()
             for epoch in range(epochs):
                 epoch_loss = 0.0
                 for X_batch, y_batch in train_loader:
                     optimizer.zero_grad()
                     outputs = model(X_batch)
-                    loss = tail_weighted_mse(outputs, y_batch, threshold=big_move_thresh, alpha=tail_alpha)
+                    loss = utils.compute_loss(
+                        y_pred=outputs,
+                        y_true=y_batch,
+                        loss_mode=loss_mode,
+                        huber_delta=huber_delta,
+                        tail_alpha=tail_alpha,
+                        tail_threshold=tail_threshold_scaled
+                    )
                     loss.backward()
                     # Gradient clipping for stability (especially important for Transformer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.WF_GRAD_CLIP_NORM)
@@ -181,13 +228,16 @@ def main():
                     avg_loss = epoch_loss / max(1, len(train_loader))
                     print(f"  Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.6f}")
             
-            # 6. Predict
+            # 7. Predict and Unscale
             model.eval()
             with torch.no_grad():
                 X_test_tensor = torch.tensor(X_test_seq, dtype=torch.float32)
-                y_pred = model(X_test_tensor).numpy().flatten()
+                y_pred_scaled = model(X_test_tensor).numpy().flatten()
+            
+            # Unscale predictions back to original scale
+            y_pred = y_pred_scaled * y_std + y_mean
                 
-            # Adjust Actuals (slice off first time_steps-1)
+            # Adjust Actuals (slice off first time_steps-1) - use raw y_test for metrics
             y_test = y_test.iloc[time_steps-1:]
             
         else:
