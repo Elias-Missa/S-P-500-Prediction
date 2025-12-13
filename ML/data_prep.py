@@ -175,16 +175,22 @@ class WalkForwardSplitter:
             if len(test_idx) == 0:
                 current_date = test_end
                 continue
+            
+            # Define Val Window and Train End based on val_months
+            if self.val_months == 0:
+                # No validation window - train ends buffer_days before test
+                val_idx = df.iloc[0:0].index  # empty index
+                train_end = current_date - pd.Timedelta(days=self.buffer_days)
+            else:
+                # Original logic for val_months > 0
+                val_end = current_date - pd.Timedelta(days=self.buffer_days)
+                val_start = val_end - pd.DateOffset(months=self.val_months)
                 
-            # Define Val Window
-            val_end = current_date - pd.Timedelta(days=self.buffer_days)
-            val_start = val_end - pd.DateOffset(months=self.val_months)
-            
-            val_mask = (dates >= val_start) & (dates <= val_end)
-            val_idx = df[val_mask].index
-            
-            # Define Train Window
-            train_end = val_start - pd.Timedelta(days=self.buffer_days)
+                val_mask = (dates >= val_start) & (dates <= val_end)
+                val_idx = df[val_mask].index
+                
+                # Train ends buffer_days before val starts
+                train_end = val_start - pd.Timedelta(days=self.buffer_days)
             
             if self.train_start_date:
                 # Expanding Window

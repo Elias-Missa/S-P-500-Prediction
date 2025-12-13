@@ -76,7 +76,7 @@ TRANSFORMER_HEADS = 4
 TRANSFORMER_DROPOUT = 0.1
 TRANSFORMER_EPOCHS = 50
 TRANSFORMER_BATCH_SIZE = 32
-TRANSFORMER_LR = 5e-4  # Conservative LR for stability
+TRANSFORMER_LR = 3e-4  # Conservative LR for stability
 TRANSFORMER_WEIGHT_DECAY = 1e-4
 
 # Optuna Tuning
@@ -95,3 +95,10 @@ TUNE_STEP_MONTHS = 6             # step between folds (months)
 TUNE_BUFFER_DAYS = 21            # embargo between train/val, similar to BUFFER_DAYS
 TUNE_MAX_FOLDS = 10              # maximum number of folds to use (for speed)
 TUNE_EPOCHS = 15                 # reduced epochs per fold during tuning
+
+# Walk-forward controls
+WF_VAL_MONTHS = 0                # default to 0 for walk-forward (no val gap)
+WF_TRAIN_ON_TRAIN_PLUS_VAL = True  # if val_months > 0, merge train+val into training
+WF_USE_TUNED_PARAMS = False
+WF_BEST_PARAMS_PATH = None       # e.g., "Output/best_params_transformer.json"
+WF_GRAD_CLIP_NORM = 1.0

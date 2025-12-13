@@ -1,3 +1,5 @@
+import os
+import json
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -24,11 +26,38 @@ def main():
     splitter = data_prep.WalkForwardSplitter(
         start_date=config.TEST_START_DATE,
         train_years=config.TRAIN_WINDOW_YEARS,
-        val_months=config.VAL_WINDOW_MONTHS,
+        val_months=config.WF_VAL_MONTHS,  # Use walk-forward specific val_months
         buffer_days=config.BUFFER_DAYS,
         step_months=1,
         train_start_date=config.TRAIN_START_DATE
     )
+    
+    # Load tuned hyperparameters if configured
+    if config.WF_USE_TUNED_PARAMS and config.WF_BEST_PARAMS_PATH:
+        if os.path.exists(config.WF_BEST_PARAMS_PATH):
+            with open(config.WF_BEST_PARAMS_PATH, 'r') as f:
+                tuned = json.load(f)
+            print(f"Loaded tuned params from {config.WF_BEST_PARAMS_PATH}:")
+            print(f"  {tuned}")
+            # Override Transformer params
+            if 'model_dim' in tuned:
+                config.TRANSFORMER_MODEL_DIM = tuned['model_dim']
+            if 'heads' in tuned:
+                config.TRANSFORMER_HEADS = tuned['heads']
+            if 'layers' in tuned:
+                config.TRANSFORMER_LAYERS = tuned['layers']
+            if 'ff_dim' in tuned:
+                config.TRANSFORMER_FEEDFORWARD_DIM = tuned['ff_dim']
+            if 'dropout' in tuned:
+                config.TRANSFORMER_DROPOUT = tuned['dropout']
+            if 'lr' in tuned:
+                config.TRANSFORMER_LR = tuned['lr']
+            if 'weight_decay' in tuned:
+                config.TRANSFORMER_WEIGHT_DECAY = tuned['weight_decay']
+            if 'time_steps' in tuned:
+                config.TRANSFORMER_TIME_STEPS = tuned['time_steps']
+        else:
+            print(f"Warning: WF_BEST_PARAMS_PATH '{config.WF_BEST_PARAMS_PATH}' not found. Using defaults.")
     
     # Exclude BigMove labels to prevent target leakage
     target_col = config.TARGET_COL
@@ -61,8 +90,14 @@ def main():
         print(f"\n=== Fold {fold+1}/{total_folds} ===")
         # Prepare Data
         X_train, y_train = df.loc[train_idx, feature_cols], df.loc[train_idx, target_col]
-        # X_val, y_val = df.loc[val_idx, feature_cols], df.loc[val_idx, target_col] # Can use for early stopping
         X_test, y_test = df.loc[test_idx, feature_cols], df.loc[test_idx, target_col]
+        
+        # Merge train+val if configured and val is non-empty
+        if config.WF_TRAIN_ON_TRAIN_PLUS_VAL and len(val_idx) > 0:
+            X_val, y_val = df.loc[val_idx, feature_cols], df.loc[val_idx, target_col]
+            print(f"  Merging train ({len(X_train)}) + val ({len(X_val)}) for training")
+            X_train = pd.concat([X_train, X_val])
+            y_train = pd.concat([y_train, y_val])
         
         # Train
         if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
@@ -135,7 +170,7 @@ def main():
                     loss = tail_weighted_mse(outputs, y_batch, threshold=big_move_thresh, alpha=tail_alpha)
                     loss.backward()
                     # Gradient clipping for stability (especially important for Transformer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.WF_GRAD_CLIP_NORM)
                     optimizer.step()
                     if scheduler is not None:
                         scheduler.step()
