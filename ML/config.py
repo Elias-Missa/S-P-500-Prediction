@@ -106,15 +106,15 @@ WF_GRAD_CLIP_NORM = 1.0
 # ===============================
 # Target Scaling (Deep Models)
 # ===============================
-TARGET_SCALING_MODE = "standardize"  # "standardize": (y - mean) / std
-                                     # "vol_scale": y / std (keeps 0 at 0)
+TARGET_SCALING_MODE = "vol_scale"  # "standardize": (y - mean) / std
+                                   # "vol_scale": y / std (keeps 0 at 0)
 
 # ===============================
 # Loss Function Configuration
 # ===============================
 LOSS_MODE = "mse"               # Options: "mse", "huber", "tail_weighted"
 HUBER_DELTA = 1.0               # Used only if LOSS_MODE == "huber"
-TAIL_ALPHA = 4.0                # Used only if LOSS_MODE == "tail_weighted"
+TAIL_ALPHA = 0.0                # Used only if LOSS_MODE == "tail_weighted" (0.0 = disabled)
 TAIL_THRESHOLD = 0.03           # Absolute return threshold for big moves
 
 # ===============================
