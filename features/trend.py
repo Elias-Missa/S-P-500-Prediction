@@ -114,3 +114,62 @@ def calculate_slope(series, window):
         return slope
         
     return series.rolling(window=window).apply(get_slope, raw=True)
+
+def calculate_trend_200ma_slope(close_series):
+    """
+    Calculates the 1-month change in the 200-day Moving Average (trend slope).
+    This captures whether the trend itself is accelerating or decelerating.
+    
+    Args:
+        close_series (pd.Series): Time series of close prices.
+        
+    Returns:
+        pd.Series: 1-month percentage change in the 200-day MA (20 trading days).
+    """
+    ma_200 = close_series.rolling(window=200).mean()
+    return ma_200.pct_change(periods=20)
+
+def calculate_dist_from_200ma(close_series):
+    """
+    Calculates the distance from the 200-day Moving Average as a percentage.
+    Measures how stretched the price is relative to the trend anchor.
+    
+    Formula: (price / ma_200) - 1.0
+    
+    Args:
+        close_series (pd.Series): Time series of close prices.
+        
+    Returns:
+        pd.Series: Percentage distance from 200-day MA.
+    """
+    ma_200 = close_series.rolling(window=200).mean()
+    return (close_series / ma_200) - 1.0
+
+def calculate_trend_efficiency(close_series, window=21):
+    """
+    Calculates Trend Efficiency (ADX Proxy).
+    Measures how smooth/trending vs choppy/mean-reverting the price action is.
+    
+    Formula: abs(price.diff(window)) / price.diff().abs().rolling(window).sum()
+    
+    High values (close to 1.0) = smooth, efficient trend (all moves in one direction)
+    Low values (close to 0.0) = choppy, mean-reverting (moves cancel out)
+    
+    Args:
+        close_series (pd.Series): Time series of close prices.
+        window (int): Lookback window (default 21 for 1 month).
+        
+    Returns:
+        pd.Series: Trend efficiency ratio (0.0 to 1.0).
+    """
+    # Net change over the window
+    net_change = close_series.diff(periods=window).abs()
+    
+    # Sum of absolute daily changes over the window
+    total_volatility = close_series.diff().abs().rolling(window=window).sum()
+    
+    # Efficiency ratio: net change / total volatility
+    efficiency = net_change / total_volatility
+    
+    # Clip to valid range [0, 1]
+    return efficiency.clip(0.0, 1.0)
