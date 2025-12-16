@@ -86,6 +86,13 @@ def resolve_model_params(model_type, best_params):
             'n_estimators': config.XGB_N_ESTIMATORS,
             'learning_rate': config.XGB_LEARNING_RATE,
             'max_depth': config.XGB_MAX_DEPTH,
+            'min_child_weight': getattr(config, 'XGB_MIN_CHILD_WEIGHT', 1),
+            'subsample': getattr(config, 'XGB_SUBSAMPLE', 1.0),
+            'colsample_bytree': getattr(config, 'XGB_COLSAMPLE_BYTREE', 1.0),
+            'gamma': getattr(config, 'XGB_GAMMA', 0),
+            'reg_alpha': getattr(config, 'XGB_REG_ALPHA', 0),
+            'reg_lambda': getattr(config, 'XGB_REG_LAMBDA', 1),
+            'max_delta_step': getattr(config, 'XGB_MAX_DELTA_STEP', 0),
             'n_jobs': -1,
             'random_state': 42
         }

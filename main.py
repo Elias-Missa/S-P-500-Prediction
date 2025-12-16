@@ -39,6 +39,11 @@ def main():
     features_df['MA_Dist_200'] = trend.calculate_ma_dist_200(spy_close)
     features_df['Hurst'] = trend.calculate_hurst(spy_close)
     
+    # Regime-Aware Trend Features
+    features_df['Trend_200MA_Slope'] = trend.calculate_trend_200ma_slope(spy_close)
+    features_df['Dist_from_200MA'] = trend.calculate_dist_from_200ma(spy_close)
+    features_df['Trend_Efficiency'] = trend.calculate_trend_efficiency(spy_close, window=21)
+    
     # New Trend Features
     # Trailing Returns: 1m (21d), 3m (63d), 6m (126d), 12m (252d)
     features_df['Return_1M'] = trend.calculate_trailing_returns(spy_close, window=21)

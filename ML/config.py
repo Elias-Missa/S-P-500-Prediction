@@ -13,7 +13,7 @@ TARGET_COL = 'Target_1M'
 
 # Big-move configuration
 BIG_MOVE_THRESHOLD = 0.03  # 3% 1M move defines a 'big' move for now
-BIG_MOVE_ALPHA = 4.0       # extra weight factor in tail-weighted loss (total weight = 1 + alpha)
+BIG_MOVE_ALPHA = 0.0       # extra weight factor in tail-weighted loss (0.0 = disabled)
 
 # Splitting Parameters
 TEST_START_DATE = '2023-01-01'
@@ -35,9 +35,16 @@ RF_MIN_SAMPLES_LEAF = 1
 RF_RANDOM_STATE = 42
 
 # XGBoost Params
-XGB_N_ESTIMATORS = 100
+XGB_N_ESTIMATORS = 150
 XGB_LEARNING_RATE = 0.1
-XGB_MAX_DEPTH = 5
+XGB_MAX_DEPTH = 4
+XGB_MIN_CHILD_WEIGHT = 1      # Minimum sum of instance weight (hessian) needed in a child
+XGB_SUBSAMPLE = 1.0            # Subsample ratio of the training instances (0-1)
+XGB_COLSAMPLE_BYTREE = 1.0     # Subsample ratio of columns when constructing each tree (0-1)
+XGB_GAMMA = 0                  # Minimum loss reduction required to make a further partition (min_split_loss)
+XGB_REG_ALPHA = 0              # L1 regularization term on weights
+XGB_REG_LAMBDA = 1             # L2 regularization term on weights
+XGB_MAX_DELTA_STEP = 0        # Maximum delta step for tree constraints (0 = no constraint)
 
 # MLP Params
 MLP_HIDDEN_LAYERS = (64, 32)
@@ -97,16 +104,20 @@ TUNE_MAX_FOLDS = 10              # maximum number of folds to use (for speed)
 TUNE_EPOCHS = 15                 # reduced epochs per fold during tuning
 
 # Walk-forward controls
-WF_VAL_MONTHS = 0                # default to 0 for walk-forward (no val gap)
-WF_TRAIN_ON_TRAIN_PLUS_VAL = True  # if val_months > 0, merge train+val into training
+WF_VAL_MONTHS = 6                # CHANGED from 0: Validation window size
+WF_TRAIN_ON_TRAIN_PLUS_VAL = False  # CHANGED to False: Don't train on val data (keep it pure for early stopping)
 WF_USE_TUNED_PARAMS = False
 WF_BEST_PARAMS_PATH = None       # e.g., "Output/best_params_transformer.json"
 WF_GRAD_CLIP_NORM = 1.0
 
+# Early Stopping Configuration (NEW)
+WF_EARLY_STOPPING = True         # Enable safety net
+WF_PATIENCE = 15                 # Stop if val loss doesn't improve for 15 epochs
+
 # ===============================
 # Target Scaling (Deep Models)
 # ===============================
-TARGET_SCALING_MODE = "vol_scale"  # "standardize": (y - mean) / std
+TARGET_SCALING_MODE = "standardize"  # "standardize": (y - mean) / std
                                    # "vol_scale": y / std (keeps 0 at 0)
 
 # ===============================

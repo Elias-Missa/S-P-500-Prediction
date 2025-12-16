@@ -251,9 +251,14 @@ class HyperparameterTuner:
         params = {
             'n_estimators': trial.suggest_int('n_estimators', 50, 300),
             'max_depth': trial.suggest_int('max_depth', 3, 10),
-            'learning_rate': trial.suggest_loguniform('learning_rate', 0.01, 0.3),
-            'subsample': trial.suggest_uniform('subsample', 0.5, 1.0),
-            'colsample_bytree': trial.suggest_uniform('colsample_bytree', 0.5, 1.0),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+            'min_child_weight': trial.suggest_int('min_child_weight', 1, 7),
+            'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+            'gamma': trial.suggest_float('gamma', 0, 0.5),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0, 1.0),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0, 2.0),
+            'max_delta_step': trial.suggest_int('max_delta_step', 0, 10),
             'random_state': 42,
             'n_jobs': -1
         }

@@ -181,6 +181,29 @@ def main():
                 batch_size = config.TRANSFORMER_BATCH_SIZE
             train_loader = lstm_dataset.prepare_dataloader(X_train_seq, y_train_seq, batch_size=batch_size)
             
+            # 4b. Prepare Validation DataLoader for Early Stopping (if available)
+            val_loader = None
+            has_val = has_val_set and X_val_orig is not None and len(X_val_orig) >= time_steps
+            if has_val:
+                # Scale val features using train-fitted scaler
+                X_val_scaled = scaler.transform(X_val_orig)
+                
+                # Scale val targets using train stats
+                if scaling_mode == "vol_scale":
+                    y_val_scaled = y_val_orig / y_std
+                else:
+                    y_val_scaled = (y_val_orig - y_mean) / y_std
+                
+                # Create sequences for val
+                X_val_seq, y_val_seq = lstm_dataset.create_sequences(X_val_scaled, y_val_scaled.values, time_steps)
+                
+                if len(X_val_seq) > 0:
+                    val_loader = lstm_dataset.prepare_dataloader(X_val_seq, y_val_seq, batch_size=batch_size)
+                    print(f"  Validation set prepared: {len(X_val_seq)} sequences")
+                else:
+                    has_val = False
+                    print(f"  Warning: Validation sequences empty, disabling early stopping for this fold")
+            
             # 5. Initialize Model
             input_dim = X_train_seq.shape[2]
             weight_decay = 0
@@ -219,9 +242,15 @@ def main():
                     return 1.0
                 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
             
-            # 6. Train Loop
+            # 6. Training Loop with Early Stopping
+            best_val_loss = float('inf')
+            patience_counter = 0
+            best_model_state = None  # To save the best weights
+            
             model.train()
+            
             for epoch in range(epochs):
+                # 1. Training Step
                 epoch_loss = 0.0
                 for X_batch, y_batch in train_loader:
                     optimizer.zero_grad()
@@ -235,17 +264,59 @@ def main():
                         tail_threshold=tail_threshold_scaled
                     )
                     loss.backward()
-                    # Gradient clipping for stability (especially important for Transformer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.WF_GRAD_CLIP_NORM)
+                    # Apply gradient clipping from config
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=getattr(config, 'WF_GRAD_CLIP_NORM', 1.0))
                     optimizer.step()
                     if scheduler is not None:
                         scheduler.step()
                     epoch_loss += loss.item()
                 
-                # Lightweight progress logging
-                if (epoch + 1) % max(1, epochs // 5) == 0 or epoch == 0:
-                    avg_loss = epoch_loss / max(1, len(train_loader))
-                    print(f"  Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.6f}")
+                # 2. Validation & Early Stopping
+                if has_val and val_loader:
+                    model.eval()
+                    val_loss_sum = 0.0
+                    with torch.no_grad():
+                        for X_v, y_v in val_loader:
+                            out_v = model(X_v)
+                            loss_v = utils.compute_loss(
+                                y_pred=out_v,
+                                y_true=y_v,
+                                loss_mode=loss_mode,
+                                huber_delta=huber_delta,
+                                tail_alpha=tail_alpha,
+                                tail_threshold=tail_threshold_scaled
+                            )
+                            val_loss_sum += loss_v.item()
+                    
+                    avg_val_loss = val_loss_sum / max(1, len(val_loader))
+                    avg_train_loss = epoch_loss / max(1, len(train_loader))
+                    # Log progress occasionally (every 10 epochs or first one)
+                    if (epoch + 1) % 10 == 0 or epoch == 0:
+                        print(f"  Epoch {epoch+1}/{epochs} | Train: {avg_train_loss:.5f} | Val: {avg_val_loss:.5f}")
+                    # Check Early Stopping
+                    if getattr(config, 'WF_EARLY_STOPPING', False):
+                        if avg_val_loss < best_val_loss:
+                            best_val_loss = avg_val_loss
+                            patience_counter = 0
+                            # Save best weights in memory
+                            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                        else:
+                            patience_counter += 1
+                            if patience_counter >= getattr(config, 'WF_PATIENCE', 15):
+                                print(f"  [Early Stopping] No improvement for {getattr(config, 'WF_PATIENCE', 15)} epochs. Stopping at epoch {epoch+1}.")
+                                break
+                    
+                    model.train()  # Switch back to train for next epoch
+                else:
+                    # No validation set - use simple logging
+                    if (epoch + 1) % max(1, epochs // 5) == 0 or epoch == 0:
+                        avg_loss = epoch_loss / max(1, len(train_loader))
+                        print(f"  Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.6f}")
+            
+            # 3. Restore Best Weights (Critical!)
+            if getattr(config, 'WF_EARLY_STOPPING', False) and best_model_state is not None:
+                model.load_state_dict(best_model_state)
+                print(f"  Restored best model from validation (Loss: {best_val_loss:.6f})")
             
             # 7. Predict and Unscale
             model.eval()
