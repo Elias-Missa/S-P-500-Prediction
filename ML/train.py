@@ -411,13 +411,19 @@ def main():
         model = models.ModelFactory.get_model(config.MODEL_TYPE, overrides=model_params)
         
         # Compute sample weights to emphasize big moves
-        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
-        tail_alpha = getattr(config, 'BIG_MOVE_ALPHA', 4.0)
-        is_big = (y_train.abs() > big_move_thresh).astype(float)
-        sample_weight = 1.0 + tail_alpha * is_big
+        # Use TAIL_ALPHA if available, otherwise fall back to BIG_MOVE_ALPHA for backward compatibility
+        tail_alpha = getattr(config, 'TAIL_ALPHA', getattr(config, 'BIG_MOVE_ALPHA', 4.0))
         
-        n_big = int(is_big.sum())
-        print(f"Sample weighting: {n_big} big moves ({100*n_big/len(y_train):.1f}%) get {1+tail_alpha}x weight")
+        if tail_alpha == 0.0:
+            # No weighting needed - use uniform weights to avoid unnecessary computation
+            sample_weight = np.ones(len(y_train))
+            print("Sample weighting: Disabled (TAIL_ALPHA = 0.0)")
+        else:
+            big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+            is_big = (y_train.abs() > big_move_thresh).astype(float)
+            sample_weight = 1.0 + tail_alpha * is_big
+            n_big = int(is_big.sum())
+            print(f"Sample weighting: {n_big} big moves ({100*n_big/len(y_train):.1f}%) get {1+tail_alpha}x weight")
         
         # Try to fit with sample_weight; fall back if not supported
         try:
