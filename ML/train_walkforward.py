@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
-from ML import config, data_prep, models, utils, metrics, lstm_dataset
+from ML import config, data_prep, models, utils, metrics, lstm_dataset, tuning
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
@@ -100,17 +100,93 @@ def main():
     print(f"Model: {config.MODEL_TYPE}")
     print(f"Rolling Train Window: {config.TRAIN_WINDOW_YEARS} years")
     
-    # Determine time_steps for deep models
-    time_steps = None
-    if config.MODEL_TYPE == 'LSTM':
-        time_steps = getattr(config, 'LSTM_TIME_STEPS', 10)
-    elif config.MODEL_TYPE == 'CNN':
-        time_steps = getattr(config, 'CNN_TIME_STEPS', 10)
-    elif config.MODEL_TYPE == 'Transformer':
-        time_steps = getattr(config, 'TRANSFORMER_TIME_STEPS', 20)
-    
-    if time_steps is not None:
-        print(f"Using time_steps={time_steps} for sequence creation")
+    # --- Optuna Hyperparameter Tuning (if enabled and not using pre-tuned params) ---
+    best_params = {}
+    if config.WF_USE_TUNED_PARAMS and config.WF_BEST_PARAMS_PATH and os.path.exists(config.WF_BEST_PARAMS_PATH):
+        # Load pre-tuned params from file
+        with open(config.WF_BEST_PARAMS_PATH, 'r') as f:
+            best_params = json.load(f)
+        print(f"Using pre-tuned parameters from {config.WF_BEST_PARAMS_PATH}")
+        logger.set_tuning_info(
+            method=f"Pre-tuned parameters loaded from file",
+            n_folds=None,
+            tune_start_date=None,
+            tune_end_date=None,
+            n_trials=None,
+        )
+    elif config.USE_OPTUNA:
+        print("\n=== Starting Optuna Hyperparameter Tuning ===")
+        # Use the first fold's data for tuning, or use tuning window if available
+        # Get first fold for tuning data
+        first_fold_data = list(splitter.split(df))
+        if len(first_fold_data) > 0:
+            first_fold, first_train_idx, first_val_idx, first_test_idx = first_fold_data[0]
+            X_tune_train = df.loc[first_train_idx, feature_cols]
+            y_tune_train = df.loc[first_train_idx, target_col]
+            
+            # For validation, use first fold's validation set if available, otherwise create a split
+            if len(first_val_idx) > 0 and not config.WF_TRAIN_ON_TRAIN_PLUS_VAL:
+                X_tune_val = df.loc[first_val_idx, feature_cols]
+                y_tune_val = df.loc[first_val_idx, target_col]
+            else:
+                # Split training data for tuning validation
+                split_point = int(len(X_tune_train) * 0.8)
+                X_tune_val = X_tune_train.iloc[split_point:]
+                y_tune_val = y_tune_train.iloc[split_point:]
+                X_tune_train = X_tune_train.iloc[:split_point]
+                y_tune_train = y_tune_train.iloc[:split_point]
+            
+            # For deep models, pass full data to enable walk-forward CV during tuning
+            if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
+                # Use data up to TEST_START_DATE for tuning (to avoid leakage)
+                tune_end_date = pd.to_datetime(config.TEST_START_DATE) - pd.Timedelta(days=config.BUFFER_DAYS)
+                mask = df.index <= tune_end_date
+                full_X = df.loc[mask, feature_cols]
+                full_y = df.loc[mask, target_col]
+                tuner = tuning.HyperparameterTuner(
+                    config.MODEL_TYPE, X_tune_train, y_tune_train, X_tune_val, y_tune_val,
+                    full_X=full_X, full_y=full_y
+                )
+            else:
+                tuner = tuning.HyperparameterTuner(
+                    config.MODEL_TYPE, X_tune_train, y_tune_train, X_tune_val, y_tune_val
+                )
+            
+            best_params = tuner.optimize(n_trials=config.OPTUNA_TRIALS)
+            
+            # Record tuning metadata for logging
+            if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
+                # Deep models use walk-forward CV
+                n_folds = tuner.get_tuning_fold_count()
+                logger.set_tuning_info(
+                    method="WalkForward CV (multiple folds across tuning window)",
+                    n_folds=n_folds,
+                    tune_start_date=getattr(config, 'TUNE_START_DATE', None),
+                    tune_end_date=getattr(config, 'TUNE_END_DATE', None),
+                    n_trials=config.OPTUNA_TRIALS,
+                )
+            else:
+                # Basic models use static single split
+                logger.set_tuning_info(
+                    method="Static (single train/val split)",
+                    n_folds=1,
+                    tune_start_date=str(X_tune_train.index.min().date()) if hasattr(X_tune_train.index, "min") else None,
+                    tune_end_date=str(X_tune_val.index.max().date()) if hasattr(X_tune_val.index, "max") else None,
+                    n_trials=config.OPTUNA_TRIALS,
+                )
+            
+            print(f"Optuna tuning complete. Best params: {best_params}\n")
+        else:
+            print("Warning: No folds available for tuning. Skipping Optuna optimization.")
+    else:
+        # Record that no tuning was performed
+        logger.set_tuning_info(
+            method="None (using default config parameters)",
+            n_folds=None,
+            tune_start_date=None,
+            tune_end_date=None,
+            n_trials=None,
+        )
     
     # Materialize splits so we can report progress and counts
     splits = list(splitter.split(df))
@@ -139,6 +215,18 @@ def main():
         # Train
         if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
             # --- Deep Learning Training Logic ---
+            # Determine time_steps for deep models (use tuned params if available)
+            time_steps = None
+            if config.MODEL_TYPE == 'LSTM':
+                time_steps = best_params.get('time_steps', getattr(config, 'LSTM_TIME_STEPS', 10))
+            elif config.MODEL_TYPE == 'CNN':
+                time_steps = best_params.get('time_steps', getattr(config, 'CNN_TIME_STEPS', 10))
+            elif config.MODEL_TYPE == 'Transformer':
+                time_steps = best_params.get('time_steps', getattr(config, 'TRANSFORMER_TIME_STEPS', 20))
+            
+            if time_steps is not None and fold == 0:
+                print(f"Using time_steps={time_steps} for sequence creation")
+            
             # 1. Scale target per fold for stability (train-only stats)
             scaling_mode = getattr(config, 'TARGET_SCALING_MODE', 'standardize')
             y_std = y_train.std()
@@ -172,13 +260,13 @@ def main():
                 print(f"Fold {fold}: Skipping due to insufficient data for sequence generation.")
                 continue
             
-            # 4. Create DataLoader
+            # 4. Create DataLoader (use tuned batch_size if available)
             if config.MODEL_TYPE == 'LSTM':
-                batch_size = config.LSTM_BATCH_SIZE
+                batch_size = best_params.get('batch_size', config.LSTM_BATCH_SIZE)
             elif config.MODEL_TYPE == 'CNN':
-                batch_size = config.CNN_BATCH_SIZE
+                batch_size = best_params.get('batch_size', config.CNN_BATCH_SIZE)
             elif config.MODEL_TYPE == 'Transformer':
-                batch_size = config.TRANSFORMER_BATCH_SIZE
+                batch_size = best_params.get('batch_size', config.TRANSFORMER_BATCH_SIZE)
             train_loader = lstm_dataset.prepare_dataloader(X_train_seq, y_train_seq, batch_size=batch_size)
             
             # 4b. Prepare Validation DataLoader for Early Stopping (if available)
@@ -204,21 +292,46 @@ def main():
                     has_val = False
                     print(f"  Warning: Validation sequences empty, disabling early stopping for this fold")
             
-            # 5. Initialize Model
+            # 5. Initialize Model (apply tuned parameters)
             input_dim = X_train_seq.shape[2]
             weight_decay = 0
             if config.MODEL_TYPE == 'LSTM':
-                model = models.ModelFactory.get_model('LSTM', input_dim=input_dim)
-                lr = config.LSTM_LEARNING_RATE
+                # Apply tuned params to LSTM model
+                hidden_dim = best_params.get('hidden_dim', config.LSTM_HIDDEN_DIM)
+                num_layers = best_params.get('num_layers', config.LSTM_LAYERS)
+                dropout = best_params.get('dropout', 0.2)
+                from ML.models import LSTMModel
+                model = LSTMModel(input_dim, hidden_dim, num_layers, output_dim=1, dropout=dropout)
+                lr = best_params.get('lr', config.LSTM_LEARNING_RATE)
                 epochs = config.LSTM_EPOCHS
             elif config.MODEL_TYPE == 'CNN':
-                model = models.ModelFactory.get_model('CNN', input_dim=input_dim)
-                lr = config.CNN_LEARNING_RATE
+                # Apply tuned params to CNN model
+                filters = best_params.get('filters', config.CNN_FILTERS)
+                kernel_size = best_params.get('kernel_size', config.CNN_KERNEL_SIZE)
+                num_layers = best_params.get('layers', config.CNN_LAYERS)
+                dropout = best_params.get('dropout', config.CNN_DROPOUT)
+                from ML.models import CNN1DModel
+                model = CNN1DModel(input_dim, filters, kernel_size, num_layers, dropout=dropout, output_dim=1)
+                lr = best_params.get('lr', config.CNN_LEARNING_RATE)
                 epochs = config.CNN_EPOCHS
             elif config.MODEL_TYPE == 'Transformer':
-                model = models.ModelFactory.get_model('Transformer', input_dim=input_dim)
-                lr = config.TRANSFORMER_LR
-                weight_decay = config.TRANSFORMER_WEIGHT_DECAY
+                # Apply tuned params to Transformer model
+                model_dim = best_params.get('model_dim', config.TRANSFORMER_MODEL_DIM)
+                num_heads = best_params.get('num_heads', config.TRANSFORMER_HEADS)
+                num_layers = best_params.get('num_layers', config.TRANSFORMER_LAYERS)
+                dim_feedforward = best_params.get('dim_feedforward', config.TRANSFORMER_FEEDFORWARD_DIM)
+                dropout = best_params.get('dropout', config.TRANSFORMER_DROPOUT)
+                from ML.transformer.model import TransformerModel
+                model = TransformerModel(
+                    input_dim=input_dim,
+                    model_dim=model_dim,
+                    num_heads=num_heads,
+                    num_layers=num_layers,
+                    dim_feedforward=dim_feedforward,
+                    dropout=dropout
+                )
+                lr = best_params.get('lr', config.TRANSFORMER_LR)
+                weight_decay = best_params.get('weight_decay', config.TRANSFORMER_WEIGHT_DECAY)
                 epochs = config.TRANSFORMER_EPOCHS
             
             # Loss function configuration (scale threshold for scaled targets)
@@ -361,7 +474,64 @@ def main():
             
         else:
             # --- Standard ML Training ---
-            model = models.ModelFactory.get_model(config.MODEL_TYPE)
+            # Apply tuned parameters for standard ML models
+            # Helper function to resolve model params (copied from train.py for independence)
+            def resolve_model_params(model_type, best_params):
+                """Merge config defaults with tuned parameters without mutating globals."""
+                params = {}
+                if model_type == 'RandomForest':
+                    params = {
+                        'n_estimators': config.RF_N_ESTIMATORS,
+                        'max_depth': config.RF_MAX_DEPTH,
+                        'min_samples_split': config.RF_MIN_SAMPLES_SPLIT,
+                        'min_samples_leaf': config.RF_MIN_SAMPLES_LEAF,
+                        'random_state': config.RF_RANDOM_STATE,
+                        'n_jobs': -1
+                    }
+                elif model_type == 'XGBoost':
+                    params = {
+                        'n_estimators': config.XGB_N_ESTIMATORS,
+                        'learning_rate': config.XGB_LEARNING_RATE,
+                        'max_depth': config.XGB_MAX_DEPTH,
+                        'min_child_weight': getattr(config, 'XGB_MIN_CHILD_WEIGHT', 1),
+                        'subsample': getattr(config, 'XGB_SUBSAMPLE', 1.0),
+                        'colsample_bytree': getattr(config, 'XGB_COLSAMPLE_BYTREE', 1.0),
+                        'gamma': getattr(config, 'XGB_GAMMA', 0),
+                        'reg_alpha': getattr(config, 'XGB_REG_ALPHA', 0),
+                        'reg_lambda': getattr(config, 'XGB_REG_LAMBDA', 1),
+                        'max_delta_step': getattr(config, 'XGB_MAX_DELTA_STEP', 0),
+                        'n_jobs': -1,
+                        'random_state': 42
+                    }
+                elif model_type == 'MLP':
+                    params = {
+                        'hidden_layer_sizes': config.MLP_HIDDEN_LAYERS,
+                        'learning_rate_init': config.MLP_LEARNING_RATE_INIT,
+                        'alpha': config.MLP_ALPHA,
+                        'max_iter': config.MLP_MAX_ITER,
+                        'random_state': 42,
+                        'early_stopping': True
+                    }
+                    if 'n_layers' in best_params:
+                        n_layers = best_params.get('n_layers', len(config.MLP_HIDDEN_LAYERS))
+                        layers = []
+                        for i in range(n_layers):
+                            layers.append(best_params.get(f'n_units_l{i}', config.MLP_HIDDEN_LAYERS[i % len(config.MLP_HIDDEN_LAYERS)]))
+                        params['hidden_layer_sizes'] = tuple(layers)
+                    if 'learning_rate_init' in best_params:
+                        params['learning_rate_init'] = best_params['learning_rate_init']
+                    if 'alpha' in best_params:
+                        params['alpha'] = best_params['alpha']
+                
+                # Apply overrides where keys overlap
+                for k, v in best_params.items():
+                    if k in params:
+                        params[k] = v
+                
+                return params
+            
+            model_params = resolve_model_params(config.MODEL_TYPE, best_params)
+            model = models.ModelFactory.get_model(config.MODEL_TYPE, overrides=model_params)
             model.fit(X_train, y_train)
             y_pred = model.predict(X_test)
             
