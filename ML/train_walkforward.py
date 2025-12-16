@@ -272,6 +272,11 @@ def main():
             # 4b. Prepare Validation DataLoader for Early Stopping (if available)
             val_loader = None
             has_val = has_val_set and X_val_orig is not None and len(X_val_orig) >= time_steps
+            if fold == 0 and config.MODEL_TYPE == 'Transformer':
+                # Debug output for first fold to diagnose validation setup
+                print(f"  Debug: has_val_set={has_val_set}, X_val_orig is not None={X_val_orig is not None}, "
+                      f"len(X_val_orig)={len(X_val_orig) if X_val_orig is not None else 0}, "
+                      f"time_steps={time_steps}, has_val={has_val}")
             if has_val:
                 # Scale val features using train-fitted scaler
                 X_val_scaled = scaler.transform(X_val_orig)
@@ -422,8 +427,9 @@ def main():
                     model.train()  # Switch back to train for next epoch
                 else:
                     # No validation set - use simple logging
-                    if (epoch + 1) % max(1, epochs // 5) == 0 or epoch == 0:
-                        avg_loss = epoch_loss / max(1, len(train_loader))
+                    avg_loss = epoch_loss / max(1, len(train_loader))
+                    # Log every 10 epochs (same as validation branch) or first/last epoch
+                    if (epoch + 1) % 10 == 0 or epoch == 0 or epoch == epochs - 1:
                         print(f"  Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.6f}")
             
             # 3. Restore Best Weights (Critical!)
