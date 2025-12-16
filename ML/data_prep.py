@@ -43,7 +43,12 @@ def load_and_prep_data():
 
     # Fill gaps conservatively to avoid throwing away otherwise useful rows
     df.ffill(inplace=True)
-    df.bfill(inplace=True)
+    
+    # Backward-fill ONLY non-macro columns to avoid re-introducing look-ahead bias
+    # for release-delayed macro series (ISM_PMI, UMICH_SENT) that were lagged in data_loader
+    macro_lag_cols = getattr(config, "MACRO_LAG_RELEASE_COLS", [])
+    bfill_cols = [c for c in df.columns if c not in macro_lag_cols]
+    df[bfill_cols] = df[bfill_cols].bfill()
 
     # Remove rows where the target remains undefined (tail after shifting)
     df.dropna(subset=[config.TARGET_COL], inplace=True)

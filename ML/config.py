@@ -110,3 +110,17 @@ LOSS_MODE = "mse"               # Options: "mse", "huber", "tail_weighted"
 HUBER_DELTA = 1.0               # Used only if LOSS_MODE == "huber"
 TAIL_ALPHA = 4.0                # Used only if LOSS_MODE == "tail_weighted"
 TAIL_THRESHOLD = 0.03           # Absolute return threshold for big moves
+
+# ===============================
+# Prediction Clipping (Strategy Only)
+# ===============================
+PRED_CLIP = None                # If not None, clip y_pred in strategy calculations only
+                                # e.g., PRED_CLIP = 0.2 clips predictions to [-0.2, 0.2]
+
+# ===============================
+# Macro Lagging (Release-Delay Approximation)
+# ===============================
+# Reduces look-ahead bias for macro series that have publication delays
+APPLY_MACRO_LAG = True
+MACRO_LAG_RELEASE_COLS = ["ISM_PMI", "UMICH_SENT"]  # Columns to lag
+MACRO_LAG_DAYS = 22  # ~1 trading month delay approximation

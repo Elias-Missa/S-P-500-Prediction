@@ -95,6 +95,7 @@ def main():
     
     all_preds = []
     all_actuals = []
+    fold_metrics_list = []  # Store per-fold metrics
     
     print(f"Model: {config.MODEL_TYPE}")
     print(f"Rolling Train Window: {config.TRAIN_WINDOW_YEARS} years")
@@ -250,6 +251,42 @@ def main():
         all_preds.extend(y_pred)
         all_actuals.extend(y_test)
         
+        # Compute per-fold metrics
+        y_test_arr = np.array(y_test) if hasattr(y_test, 'values') else y_test
+        y_pred_arr = np.array(y_pred)
+        
+        if len(y_test_arr) > 0:
+            fold_rmse = np.sqrt(mean_squared_error(y_test_arr, y_pred_arr))
+            fold_mae = mean_absolute_error(y_test_arr, y_pred_arr)
+            fold_dir_acc = np.mean(np.sign(y_test_arr) == np.sign(y_pred_arr)) * 100
+            fold_ic = metrics.calculate_ic(y_test_arr, y_pred_arr)
+            
+            big_move_thresh = getattr(config, 'TAIL_THRESHOLD', getattr(config, 'BIG_MOVE_THRESHOLD', 0.03))
+            pred_clip = getattr(config, 'PRED_CLIP', None)
+            fold_tail = metrics.calculate_tail_metrics(y_test_arr, y_pred_arr, threshold=big_move_thresh)
+            fold_strat = metrics.calculate_strategy_metrics(y_test_arr, y_pred_arr, pred_clip=pred_clip)
+            fold_bigmove_strat = metrics.calculate_bigmove_strategy_metrics(y_test_arr, y_pred_arr, threshold=big_move_thresh, pred_clip=pred_clip)
+            
+            fold_metrics_list.append({
+                'fold_id': fold,
+                'train_start': str(train_idx.min().date()),
+                'train_end': str(train_idx.max().date()),
+                'test_start': str(test_idx.min().date()),
+                'test_end': str(test_idx.max().date()),
+                'n_train': len(train_idx),
+                'n_test': len(y_test_arr),
+                'rmse': fold_rmse,
+                'mae': fold_mae,
+                'dir_acc': fold_dir_acc,
+                'ic': fold_ic,
+                'big_up_precision': fold_tail['precision_up_strict'],
+                'big_up_recall': fold_tail['recall_up_strict'],
+                'big_down_precision': fold_tail['precision_down_strict'],
+                'big_down_recall': fold_tail['recall_down_strict'],
+                'strategy_sharpe': fold_strat['sharpe'],
+                'big_move_sharpe': fold_bigmove_strat['sharpe']
+            })
+        
         if fold % 5 == 0:
             print(f"Fold {fold}: Predicted {len(y_test)} samples. (Test Date: {test_idx.min().date()})")
             
@@ -263,10 +300,11 @@ def main():
     
     # Advanced Metrics
     big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+    pred_clip = getattr(config, 'PRED_CLIP', None)
     ic = metrics.calculate_ic(all_actuals, all_preds)
-    strat_metrics = metrics.calculate_strategy_metrics(all_actuals, all_preds)
+    strat_metrics = metrics.calculate_strategy_metrics(all_actuals, all_preds, pred_clip=pred_clip)
     tail_metrics = metrics.calculate_tail_metrics(all_actuals, all_preds, threshold=big_move_thresh)
-    bigmove_strat = metrics.calculate_bigmove_strategy_metrics(all_actuals, all_preds, threshold=big_move_thresh)
+    bigmove_strat = metrics.calculate_bigmove_strategy_metrics(all_actuals, all_preds, threshold=big_move_thresh, pred_clip=pred_clip)
     
     print(f"\n--- Walk-Forward Results (Aggregated) ---")
     print(f"Total Samples: {len(all_actuals)}")
@@ -318,7 +356,18 @@ def main():
     metrics_val = {'rmse': 0, 'mae': 0, 'dir_acc': 0} # Placeholder
     metrics_train = {'rmse': 0, 'mae': 0, 'dir_acc': 0} # Placeholder
     
-    logger.log_summary(metrics_train, metrics_val, metrics_test, config.MODEL_TYPE, feature_cols)
+    # Save fold-level metrics to CSV
+    logger.save_fold_metrics_csv(fold_metrics_list)
+    
+    # Log summary with diagnostics
+    logger.log_summary(
+        metrics_train, metrics_val, metrics_test, 
+        config.MODEL_TYPE, feature_cols,
+        y_true=all_actuals, 
+        y_pred=all_preds,
+        target_scaling_info=None,  # Walk-forward uses per-fold scaling, so no single value
+        fold_metrics=fold_metrics_list
+    )
 
 if __name__ == "__main__":
     import argparse

@@ -34,14 +34,24 @@ def calculate_ic(y_true, y_pred):
     corr, _ = spearmanr(y_true, y_pred)
     return corr
 
-def calculate_strategy_metrics(y_true, y_pred):
+def calculate_strategy_metrics(y_true, y_pred, pred_clip=None):
     """
     Simulates a simple Long/Short strategy based on prediction sign.
     Returns a dictionary of metrics.
+    
+    Args:
+        y_true: Actual returns
+        y_pred: Predicted returns
+        pred_clip: If not None, clip predictions to [-pred_clip, pred_clip] 
+                   before computing signals (for strategy only)
     """
+    y_pred_strat = np.array(y_pred)
+    if pred_clip is not None:
+        y_pred_strat = np.clip(y_pred_strat, -pred_clip, pred_clip)
+    
     # Strategy: Long if pred > 0, Short if pred < 0
     # Returns: sign(pred) * actual
-    signals = np.sign(y_pred)
+    signals = np.sign(y_pred_strat)
     strategy_returns = signals * y_true
     
     # Cumulative Return
@@ -77,7 +87,7 @@ def calculate_strategy_metrics(y_true, y_pred):
     }
 
 
-def calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=0.03):
+def calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=0.03, pred_clip=None):
     """
     Simulates a strategy that only trades when a big move is predicted.
     
@@ -89,16 +99,21 @@ def calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=0.03):
         y_true: Actual returns (array-like)
         y_pred: Predicted returns (array-like)
         threshold: Absolute return threshold for entering a position
+        pred_clip: If not None, clip predictions to [-pred_clip, pred_clip] 
+                   before computing signals (for strategy only)
         
     Returns:
         Dictionary with strategy performance metrics
     """
     y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
+    y_pred_strat = np.array(y_pred)
+    
+    if pred_clip is not None:
+        y_pred_strat = np.clip(y_pred_strat, -pred_clip, pred_clip)
     
     # Define signals: only trade on predicted big moves
-    pred_up = y_pred > threshold
-    pred_down = y_pred < -threshold
+    pred_up = y_pred_strat > threshold
+    pred_down = y_pred_strat < -threshold
     
     signals = np.zeros_like(y_pred)
     signals[pred_up] = 1.0

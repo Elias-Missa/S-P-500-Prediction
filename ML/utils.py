@@ -108,10 +108,23 @@ class ExperimentLogger:
             "n_trials": n_trials,
         }
         
-    def log_summary(self, metrics_train, metrics_val, metrics_test, model_type, feature_cols):
+    def log_summary(self, metrics_train, metrics_val, metrics_test, model_type, feature_cols,
+                    y_true=None, y_pred=None, target_scaling_info=None, fold_metrics=None):
         """
         Writes a markdown summary of the run with detailed explanations.
+        
+        Args:
+            metrics_train: dict with train metrics
+            metrics_val: dict with validation metrics
+            metrics_test: dict with test metrics
+            model_type: string model name
+            feature_cols: list of feature column names
+            y_true: optional numpy array of actual test values (for diagnostics)
+            y_pred: optional numpy array of predicted test values (for diagnostics)
+            target_scaling_info: optional dict with 'y_mean' and 'y_std' (for deep models)
+            fold_metrics: optional list of dicts with per-fold metrics (for walk-forward)
         """
+        import numpy as np
         summary_path = os.path.join(self.run_dir, "summary.md")
         
         # Determine Process Type for Header
@@ -180,6 +193,13 @@ class ExperimentLogger:
             if loss_mode == "tail_weighted":
                 f.write(f"- **Tail Alpha**: {config.TAIL_ALPHA}\n")
                 f.write(f"- **Tail Threshold**: {config.TAIL_THRESHOLD}\n")
+            
+            # Prediction clipping info
+            pred_clip = getattr(config, 'PRED_CLIP', None)
+            if pred_clip is not None:
+                f.write(f"- **Prediction Clipping (Strategy)**: +/- {pred_clip:.2%}\n")
+            else:
+                f.write(f"- **Prediction Clipping**: None\n")
             f.write("\n")
             
             f.write("## Model Description\n")
@@ -267,12 +287,97 @@ class ExperimentLogger:
                 f.write(f"- Precision (Down): {tm['precision_down_strict']:.2f} (Predicted: {tm['count_pred_down']})\n")
                 f.write(f"- Recall (Down): {tm['recall_down_strict']:.2f} (Actual: {tm['count_actual_down']})\n")
             
+            # Prediction Diagnostics section
+            if y_true is not None and y_pred is not None:
+                y_true_arr = np.array(y_true)
+                y_pred_arr = np.array(y_pred)
+                
+                # Use TAIL_THRESHOLD as the big move threshold
+                threshold = getattr(config, 'TAIL_THRESHOLD', getattr(config, 'BIG_MOVE_THRESHOLD', 0.03))
+                
+                f.write(f"\n### Prediction Diagnostics\n")
+                f.write(f"**Threshold for Big Moves**: {threshold:.2%}\n\n")
+                
+                # Target scaling info
+                if target_scaling_info is not None:
+                    f.write(f"**Target Scaling (Deep Models)**:\n")
+                    f.write(f"- y_mean: {target_scaling_info.get('y_mean', 0):.6f}\n")
+                    f.write(f"- y_std: {target_scaling_info.get('y_std', 1):.6f}\n\n")
+                
+                # Basic statistics
+                f.write(f"| Statistic | Actual | Predicted |\n")
+                f.write(f"|-----------|--------|----------|\n")
+                f.write(f"| Mean | {y_true_arr.mean():.4f} | {y_pred_arr.mean():.4f} |\n")
+                f.write(f"| Std | {y_true_arr.std():.4f} | {y_pred_arr.std():.4f} |\n")
+                f.write(f"| Min | {y_true_arr.min():.4f} | {y_pred_arr.min():.4f} |\n")
+                f.write(f"| Max | {y_true_arr.max():.4f} | {y_pred_arr.max():.4f} |\n")
+                
+                # Distribution statistics
+                n_samples = len(y_true_arr)
+                pct_pos_true = 100.0 * (y_true_arr > 0).sum() / n_samples
+                pct_pos_pred = 100.0 * (y_pred_arr > 0).sum() / n_samples
+                pct_big_up_true = 100.0 * (y_true_arr > threshold).sum() / n_samples
+                pct_big_up_pred = 100.0 * (y_pred_arr > threshold).sum() / n_samples
+                pct_big_dn_true = 100.0 * (y_true_arr < -threshold).sum() / n_samples
+                pct_big_dn_pred = 100.0 * (y_pred_arr < -threshold).sum() / n_samples
+                
+                f.write(f"\n| Distribution | Actual | Predicted |\n")
+                f.write(f"|--------------|--------|----------|\n")
+                f.write(f"| % Positive (>0) | {pct_pos_true:.1f}% | {pct_pos_pred:.1f}% |\n")
+                f.write(f"| % Big Up (>{threshold:.0%}) | {pct_big_up_true:.1f}% | {pct_big_up_pred:.1f}% |\n")
+                f.write(f"| % Big Down (<{-threshold:.0%}) | {pct_big_dn_true:.1f}% | {pct_big_dn_pred:.1f}% |\n")
+            
+            # Fold-level metrics summary (for walk-forward)
+            if fold_metrics is not None and len(fold_metrics) > 0:
+                f.write(f"\n### Fold-Level Analysis\n")
+                
+                # Extract IC values
+                ics = [fm.get('ic', 0) for fm in fold_metrics if fm.get('ic') is not None]
+                if len(ics) > 0:
+                    ic_mean = np.mean(ics)
+                    ic_std = np.std(ics)
+                    f.write(f"**IC across folds**: mean={ic_mean:.4f}, std={ic_std:.4f}\n\n")
+                    
+                    # Sort folds by IC
+                    sorted_folds = sorted(fold_metrics, key=lambda x: x.get('ic', 0), reverse=True)
+                    
+                    # Best 3 folds
+                    f.write(f"**Best 3 folds by IC**:\n")
+                    for fm in sorted_folds[:3]:
+                        f.write(f"- Fold {fm.get('fold_id', '?')}: IC={fm.get('ic', 0):.4f}, "
+                               f"Dir Acc={fm.get('dir_acc', 0):.1f}%, "
+                               f"Test: {fm.get('test_start', '?')} to {fm.get('test_end', '?')}\n")
+                    
+                    # Worst 3 folds
+                    f.write(f"\n**Worst 3 folds by IC**:\n")
+                    for fm in sorted_folds[-3:]:
+                        f.write(f"- Fold {fm.get('fold_id', '?')}: IC={fm.get('ic', 0):.4f}, "
+                               f"Dir Acc={fm.get('dir_acc', 0):.1f}%, "
+                               f"Test: {fm.get('test_start', '?')} to {fm.get('test_end', '?')}\n")
+            
             f.write("\n")
             
             f.write("## Features Used\n")
             f.write(f"Total Features: {len(feature_cols)}\n")
             f.write(f"List: {', '.join(feature_cols)}\n")
             
+    def save_fold_metrics_csv(self, fold_metrics):
+        """
+        Save per-fold metrics to a CSV file.
+        
+        Args:
+            fold_metrics: list of dicts with per-fold metrics
+        """
+        import pandas as pd
+        
+        if fold_metrics is None or len(fold_metrics) == 0:
+            return
+        
+        csv_path = os.path.join(self.run_dir, "fold_metrics.csv")
+        df = pd.DataFrame(fold_metrics)
+        df.to_csv(csv_path, index=False)
+        print(f"Fold metrics saved to {csv_path}")
+        
     def save_plot(self, plt_figure, filename="forecast_plot.png"):
         path = os.path.join(self.run_dir, filename)
         plt_figure.savefig(path)

@@ -6,6 +6,8 @@ import pandas as pd
 import pandas_datareader.data as web
 import yfinance as yf
 
+from ML import config
+
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Output')
 
 def _fetch_fred_series(candidates, start_date, target_name):
@@ -172,12 +174,40 @@ def fetch_data(start_date='2010-01-01'):
     else:
         quality_cols['QC_NYA50_proxy'] = 0
 
-    full_df['ISM_PMI'] = full_df['ISM_PMI'].ffill().bfill()
+    # Only forward-fill ISM_PMI here (no bfill to avoid look-ahead bias)
+    # The macro lagging logic below will handle proper shifting for release delays
+    full_df['ISM_PMI'] = full_df['ISM_PMI'].ffill()
 
     # 5. Clean up
     # Sort index
     full_df.sort_index(inplace=True)
-    
+
+    # -------------------------------------------------------------------------
+    # Anti-Leakage: Lag release-based macro series to approximate publication delay
+    # -------------------------------------------------------------------------
+    if getattr(config, "APPLY_MACRO_LAG", False):
+        lag_cols = getattr(config, "MACRO_LAG_RELEASE_COLS", [])
+        lag_days = int(getattr(config, "MACRO_LAG_DAYS", 22))
+
+        existing = [c for c in lag_cols if c in full_df.columns]
+        missing = [c for c in lag_cols if c not in full_df.columns]
+
+        print(f"[Anti-Leakage] Lagging release-based macros by {lag_days} days: {existing}")
+        if missing:
+            print(f"[Anti-Leakage] Warning: missing macro columns (not lagged): {missing}")
+
+        # Shift first (introduces NaNs at the top)
+        for c in existing:
+            full_df[c] = full_df[c].shift(lag_days)
+
+        # Then forward-fill ONLY to carry last released value forward.
+        # Do NOT backward-fill to avoid look-ahead bias.
+        full_df[existing] = full_df[existing].ffill()
+
+        # Diagnostic: report remaining NaNs after lagging and ffill
+        nan_counts = full_df[existing].isna().sum()
+        print(f"[Anti-Leakage] NaNs remaining after lag+ffill: {nan_counts.to_dict()}")
+
     # Forward fill missing data (common in macro data which is monthly/weekly vs daily stock data)
     full_df.ffill(inplace=True)
     
