@@ -250,10 +250,19 @@ class ExperimentLogger:
             f.write("- **Recall**: When a Big Move actually happens, how often did the model predict it? (High Recall = Few Missed Opportunities).\n\n")
             
             f.write("## Results\n")
-            f.write("### Validation (In-Sample / Tuning)\n")
-            f.write(f"- RMSE: {metrics_val['rmse']:.6f}\n")
-            f.write(f"- MAE: {metrics_val['mae']:.6f}\n")
-            f.write(f"- Directional Accuracy: {metrics_val['dir_acc']:.2f}%\n\n")
+            
+            # Validation metrics (may be None for walk-forward with WF_VAL_MONTHS=0)
+            if metrics_val is not None:
+                f.write("### Validation (In-Sample / Tuning)\n")
+                f.write(f"- RMSE: {metrics_val['rmse']:.6f}\n")
+                f.write(f"- MAE: {metrics_val['mae']:.6f}\n")
+                f.write(f"- Directional Accuracy: {metrics_val['dir_acc']:.2f}%\n")
+                if 'ic' in metrics_val:
+                    f.write(f"- IC: {metrics_val['ic']:.4f}\n")
+                f.write("\n")
+            else:
+                f.write("### Validation\n")
+                f.write("*No separate validation set (WF_VAL_MONTHS=0 or merged into training)*\n\n")
             
             f.write("### Test (Out of Sample)\n")
             f.write(f"- RMSE: {metrics_test['rmse']:.6f}\n")
