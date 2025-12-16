@@ -2,15 +2,17 @@ import pandas as pd
 
 def calculate_yield_curve(t10y2y_series):
     """
-    Returns the Yield Curve (10Y - 2Y Spread).
+    Returns the 3-month change in the Yield Curve (10Y - 2Y Spread).
+    This captures steepening/flattening dynamics rather than the absolute level,
+    which is important when the curve has been inverted for extended periods.
     
     Args:
         t10y2y_series (pd.Series): Series of T10Y2Y.
         
     Returns:
-        pd.Series: The yield curve spread.
+        pd.Series: The 3-month change in yield curve spread (63 trading days).
     """
-    return t10y2y_series
+    return t10y2y_series.diff(63)
 
 def calculate_ism_pmi(napm_series):
     """
