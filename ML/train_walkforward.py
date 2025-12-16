@@ -132,13 +132,24 @@ def main():
         # Train
         if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
             # --- Deep Learning Training Logic ---
-            # 1. Standardize target per fold for stability
-            y_mean = y_train.mean()
+            # 1. Scale target per fold for stability (train-only stats)
+            scaling_mode = getattr(config, 'TARGET_SCALING_MODE', 'standardize')
             y_std = y_train.std()
-            if y_std == 0:
+            if y_std == 0 or y_std < 1e-8:
                 y_std = 1.0
-            y_train_scaled = (y_train - y_mean) / y_std
-            y_test_scaled = (y_test - y_mean) / y_std
+            
+            if scaling_mode == "vol_scale":
+                # Vol-scale: divide by std only (keeps 0 at 0)
+                y_mean = 0.0
+                y_train_scaled = y_train / y_std
+                y_test_scaled = y_test / y_std
+            else:
+                # Standardize: (y - mean) / std
+                y_mean = y_train.mean()
+                y_train_scaled = (y_train - y_mean) / y_std
+                y_test_scaled = (y_test - y_mean) / y_std
+            
+            print(f"  Fold {fold} target scaling ({scaling_mode}): y_mean={y_mean:.6f}, y_std={y_std:.6f}")
             
             # 2. Scale Features (Fit on Train, Transform on Test)
             scaler = StandardScaler()
@@ -236,6 +247,8 @@ def main():
                 y_pred_scaled = model(X_test_tensor).numpy().flatten()
             
             # Unscale predictions back to original scale
+            # For vol_scale: y_mean is 0.0, so this simplifies to y_pred * y_std
+            # For standardize: y_pred * y_std + y_mean
             y_pred = y_pred_scaled * y_std + y_mean
                 
             # Adjust Actuals (slice off first time_steps-1) - use raw y_test for metrics

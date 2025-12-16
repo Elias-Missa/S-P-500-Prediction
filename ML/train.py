@@ -237,16 +237,27 @@ def main():
         # --- Deep Learning Training Logic ---
         print(f"Preparing data for {config.MODEL_TYPE}...")
 
-        # 1. Standardize target for stability (fit on train only)
-        y_mean = y_train.mean()
+        # 1. Scale target for stability (fit on train only)
+        scaling_mode = getattr(config, 'TARGET_SCALING_MODE', 'standardize')
         y_std = y_train.std()
         if y_std == 0 or y_std < 1e-8:
             y_std = 1.0
-        y_train_scaled = (y_train - y_mean) / y_std
-        y_val_scaled = (y_val - y_mean) / y_std
-        y_test_scaled = (y_test - y_mean) / y_std
-        target_scaling_info = {'y_mean': float(y_mean), 'y_std': float(y_std)}
-        print(f"Target scaling: mean={y_mean:.6f}, std={y_std:.6f}")
+        
+        if scaling_mode == "vol_scale":
+            # Vol-scale: divide by std only (keeps 0 at 0)
+            y_mean = 0.0
+            y_train_scaled = y_train / y_std
+            y_val_scaled = y_val / y_std
+            y_test_scaled = y_test / y_std
+        else:
+            # Standardize: (y - mean) / std
+            y_mean = y_train.mean()
+            y_train_scaled = (y_train - y_mean) / y_std
+            y_val_scaled = (y_val - y_mean) / y_std
+            y_test_scaled = (y_test - y_mean) / y_std
+        
+        target_scaling_info = {'y_mean': float(y_mean), 'y_std': float(y_std), 'mode': scaling_mode}
+        print(f"Target scaling ({scaling_mode}): mean={y_mean:.6f}, std={y_std:.6f}")
         
         # 2. Scale Features (Fit on Train, Transform on Val/Test)
         scaler = StandardScaler()
@@ -377,6 +388,8 @@ def main():
             y_test_pred_scaled = model(X_test_tensor).numpy().flatten()
         
         # Unscale predictions back to original scale
+        # For vol_scale: y_mean is 0.0, so this simplifies to y_pred * y_std
+        # For standardize: y_pred * y_std + y_mean
         y_train_pred = y_train_pred_scaled * y_std + y_mean
         y_val_pred = y_val_pred_scaled * y_std + y_mean
         y_test_pred = y_test_pred_scaled * y_std + y_mean

@@ -120,7 +120,7 @@ def fetch_data(start_date='2010-01-01'):
     # 2. Fetch FRED data with fallbacks
     macro_candidates = {
         'T10Y2Y': ['T10Y2Y'],  # 10Y-2Y Spread
-        'ISM_PMI': ['NAPM', 'PMI'],  # ISM and S&P Global Manufacturing PMI
+        'ISM_PMI': ['MANPMI', 'NAPM', 'PMI'],  # ISM Manufacturing PMI (try MANPMI first, then fallbacks)
         'UMICH_SENT': ['UMCSENT']  # University of Michigan Consumer Sentiment
     }
 

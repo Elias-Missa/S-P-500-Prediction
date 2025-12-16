@@ -156,7 +156,7 @@ class ExperimentLogger:
                 if n_folds is not None:
                     f.write(f"- **CV Folds**: {n_folds}\n")
                 if tune_start or tune_end:
-                    f.write(f"- **Tuning Data Window**: {tune_start or 'N/A'} → {tune_end or 'N/A'}\n")
+                    f.write(f"- **Tuning Data Window**: {tune_start or 'N/A'} to {tune_end or 'N/A'}\n")
                 if n_trials is not None:
                     f.write(f"- **Optuna Trials**: {n_trials}\n")
                 f.write("\n")
@@ -185,6 +185,10 @@ class ExperimentLogger:
             f.write("\n")
             
             # Training Loss section
+            # Target Scaling Mode (for deep models)
+            target_scaling_mode = getattr(config, 'TARGET_SCALING_MODE', 'standardize')
+            f.write(f"- **Target Scaling Mode**: `{target_scaling_mode}`\n\n")
+            
             f.write("## Training Loss\n")
             loss_mode = getattr(config, 'LOSS_MODE', 'mse')
             f.write(f"- **Loss Mode**: {loss_mode}\n")
@@ -300,7 +304,9 @@ class ExperimentLogger:
                 
                 # Target scaling info
                 if target_scaling_info is not None:
+                    scaling_mode = target_scaling_info.get('mode', 'standardize')
                     f.write(f"**Target Scaling (Deep Models)**:\n")
+                    f.write(f"- Mode: {scaling_mode}\n")
                     f.write(f"- y_mean: {target_scaling_info.get('y_mean', 0):.6f}\n")
                     f.write(f"- y_std: {target_scaling_info.get('y_std', 1):.6f}\n\n")
                 

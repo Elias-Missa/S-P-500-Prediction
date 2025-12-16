@@ -24,7 +24,7 @@ BUFFER_DAYS = 21  # Embargo period to prevent leakage (should be >= TARGET_HORIZ
 
 # Model Parameters
 # Options: 'LinearRegression', 'RandomForest', 'XGBoost', 'MLP', 'LSTM', 'CNN'
-MODEL_TYPE = 'Transformer'
+MODEL_TYPE = 'XGBoost'
 BASIC_MODEL_SUITE = ['LinearRegression', 'RandomForest', 'XGBoost', 'MLP']
 
 # Random Forest Params
@@ -104,6 +104,12 @@ WF_BEST_PARAMS_PATH = None       # e.g., "Output/best_params_transformer.json"
 WF_GRAD_CLIP_NORM = 1.0
 
 # ===============================
+# Target Scaling (Deep Models)
+# ===============================
+TARGET_SCALING_MODE = "standardize"  # "standardize": (y - mean) / std
+                                     # "vol_scale": y / std (keeps 0 at 0)
+
+# ===============================
 # Loss Function Configuration
 # ===============================
 LOSS_MODE = "mse"               # Options: "mse", "huber", "tail_weighted"
@@ -122,5 +128,5 @@ PRED_CLIP = None                # If not None, clip y_pred in strategy calculati
 # ===============================
 # Reduces look-ahead bias for macro series that have publication delays
 APPLY_MACRO_LAG = True
-MACRO_LAG_RELEASE_COLS = ["ISM_PMI", "UMICH_SENT"]  # Columns to lag
+MACRO_LAG_RELEASE_COLS = ["UMICH_SENT"]  # Columns to lag (ISM_PMI removed - data source unavailable)
 MACRO_LAG_DAYS = 22  # ~1 trading month delay approximation
