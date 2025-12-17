@@ -1,4 +1,4 @@
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.neural_network import MLPRegressor
 try:
@@ -18,6 +18,14 @@ class ModelFactory:
         overrides = overrides or {}
         if model_type == 'LinearRegression':
             return LinearRegression()
+
+        elif model_type == 'Ridge':
+            # Ridge regression with optional overrides (e.g., alpha)
+            params = {}
+            # Allow alpha and other sklearn Ridge kwargs via overrides
+            for k, v in overrides.items():
+                params[k] = v
+            return Ridge(**params)
 
         elif model_type == 'RandomForest':
             params = {

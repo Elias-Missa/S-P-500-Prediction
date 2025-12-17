@@ -488,6 +488,9 @@ def main():
     y_test_array = y_test.values if hasattr(y_test, 'values') else np.array(y_test)
     y_test_pred_array = np.array(y_test_pred)
     
+    # Save configuration JSON for reproducibility
+    logger.save_config_json(config.MODEL_TYPE, best_params)
+    
     logger.log_summary(
         metrics_train, metrics_val, metrics_test, 
         config.MODEL_TYPE, feature_cols,

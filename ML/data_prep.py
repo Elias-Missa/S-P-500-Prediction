@@ -130,9 +130,9 @@ def load_and_prep_data():
     print(f"Data loaded: {len(df)} rows. Columns: {len(df.columns)}")
     return df
 
-def validate_embargo(train_idx, val_idx, test_idx, embargo_rows, target_horizon):
+def validate_embargo(train_idx, val_idx, test_idx, embargo_rows, target_horizon, df_index=None):
     """
-    Validates that no train date is within target_horizon trading days of val/test start.
+    Validates that proper embargo exists between train/val/test splits.
     
     This is a unit-test-like check to ensure proper embargo between splits.
     Raises AssertionError if embargo is violated.
@@ -142,53 +142,67 @@ def validate_embargo(train_idx, val_idx, test_idx, embargo_rows, target_horizon)
         val_idx: Validation set index (DatetimeIndex)
         test_idx: Test set index (DatetimeIndex)
         embargo_rows: Number of embargo rows applied
-        target_horizon: TARGET_HORIZON from config (trading days for target calculation)
+        target_horizon: TARGET_HORIZON from config (trading days/months for target)
+        df_index: Full DataFrame index for computing actual positions (optional, recommended)
     """
     if len(train_idx) == 0:
         return  # Nothing to validate
     
-    train_end_pos = None
+    # If we don't have df_index, just check date ordering (weak validation)
+    if df_index is None:
+        if len(val_idx) > 0:
+            assert train_idx.max() < val_idx.min(), (
+                f"[EMBARGO VIOLATION] Train end {train_idx.max()} >= Val start {val_idx.min()}"
+            )
+            if len(test_idx) > 0:
+                assert val_idx.max() < test_idx.min(), (
+                    f"[EMBARGO VIOLATION] Val end {val_idx.max()} >= Test start {test_idx.min()}"
+                )
+        elif len(test_idx) > 0:
+            assert train_idx.max() < test_idx.min(), (
+                f"[EMBARGO VIOLATION] Train end {train_idx.max()} >= Test start {test_idx.min()}"
+            )
+        return
+    
+    # With df_index, compute actual row gaps
+    df_index = df_index.sort_values()
     
     # Check train -> val embargo
     if len(val_idx) > 0:
-        # Get positional indices in a combined sorted index
-        combined = train_idx.union(val_idx).sort_values()
-        train_end_pos_in_combined = combined.get_loc(train_idx.max())
-        val_start_pos_in_combined = combined.get_loc(val_idx.min())
+        train_end_pos = df_index.get_loc(train_idx.max())
+        val_start_pos = df_index.get_loc(val_idx.min())
         
-        gap = val_start_pos_in_combined - train_end_pos_in_combined - 1
+        gap = val_start_pos - train_end_pos - 1
         
-        assert gap >= target_horizon, (
-            f"[EMBARGO VIOLATION] Train->Val gap is {gap} rows, but TARGET_HORIZON={target_horizon}. "
-            f"Train ends at {train_idx.max()}, Val starts at {val_idx.min()}. "
-            f"Need at least {target_horizon} rows of embargo to prevent label leakage."
+        assert gap >= embargo_rows, (
+            f"[EMBARGO VIOLATION] Train->Val gap is {gap} rows, need {embargo_rows}. "
+            f"Train ends at {train_idx.max()} (pos {train_end_pos}), "
+            f"Val starts at {val_idx.min()} (pos {val_start_pos})."
         )
         
         # Also check val -> test if test exists
         if len(test_idx) > 0:
-            combined_vt = val_idx.union(test_idx).sort_values()
-            val_end_pos = combined_vt.get_loc(val_idx.max())
-            test_start_pos = combined_vt.get_loc(test_idx.min())
+            val_end_pos = df_index.get_loc(val_idx.max())
+            test_start_pos = df_index.get_loc(test_idx.min())
             
             gap_vt = test_start_pos - val_end_pos - 1
             
-            assert gap_vt >= target_horizon, (
-                f"[EMBARGO VIOLATION] Val->Test gap is {gap_vt} rows, but TARGET_HORIZON={target_horizon}. "
-                f"Val ends at {val_idx.max()}, Test starts at {test_idx.min()}. "
-                f"Need at least {target_horizon} rows of embargo to prevent label leakage."
+            assert gap_vt >= embargo_rows, (
+                f"[EMBARGO VIOLATION] Val->Test gap is {gap_vt} rows, need {embargo_rows}. "
+                f"Val ends at {val_idx.max()} (pos {val_end_pos}), "
+                f"Test starts at {test_idx.min()} (pos {test_start_pos})."
             )
     elif len(test_idx) > 0:
-        # No validation set, check train -> test directly
-        combined = train_idx.union(test_idx).sort_values()
-        train_end_pos = combined.get_loc(train_idx.max())
-        test_start_pos = combined.get_loc(test_idx.min())
+        # No val, check train -> test directly
+        train_end_pos = df_index.get_loc(train_idx.max())
+        test_start_pos = df_index.get_loc(test_idx.min())
         
         gap = test_start_pos - train_end_pos - 1
         
-        assert gap >= target_horizon, (
-            f"[EMBARGO VIOLATION] Train->Test gap is {gap} rows, but TARGET_HORIZON={target_horizon}. "
-            f"Train ends at {train_idx.max()}, Test starts at {test_idx.min()}. "
-            f"Need at least {target_horizon} rows of embargo to prevent label leakage."
+        assert gap >= embargo_rows, (
+            f"[EMBARGO VIOLATION] Train->Test gap is {gap} rows, need {embargo_rows}. "
+            f"Train ends at {train_idx.max()} (pos {train_end_pos}), "
+            f"Test starts at {test_idx.min()} (pos {test_start_pos})."
         )
 
 
@@ -289,7 +303,7 @@ class RollingWindowSplitter:
             target_horizon = 1
         else:
             target_horizon = getattr(config, 'TARGET_HORIZON', 21)
-        validate_embargo(train_indices, val_indices, test_indices, self.embargo_rows, target_horizon)
+        validate_embargo(train_indices, val_indices, test_indices, self.embargo_rows, target_horizon, df_index=dates)
         
         # Log split stats
         freq_label = "months" if self.frequency == "monthly" else "trading days"
@@ -432,7 +446,7 @@ class WalkForwardSplitter:
             if len(train_idx) > 0:
                 # Validate embargo for this fold
                 try:
-                    validate_embargo(train_idx, val_idx, test_idx, self.embargo_rows, target_horizon)
+                    validate_embargo(train_idx, val_idx, test_idx, self.embargo_rows, target_horizon, df_index=dates)
                 except AssertionError as e:
                     print(f"[WARNING] Fold {fold}: {e}")
                     current_date = test_end_date

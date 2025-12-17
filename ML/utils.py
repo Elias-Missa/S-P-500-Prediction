@@ -51,6 +51,27 @@ class ExperimentLogger:
         
         if not os.path.exists(self.base_dir):
             os.makedirs(self.base_dir)
+        
+        # Map model names to subdirectory names for organization
+        model_type_map = {
+            'LinearRegression': 'regression',
+            'Ridge': 'ridge',
+            'XGBoost': 'xgboost',
+            'LSTM': 'lstm',
+            'MLP': 'mlp',
+            'Transformer': 'transformer',
+            'RandomForest': 'randomforest',
+            'CNN': 'cnn',
+            'Ensemble': 'ensemble',
+        }
+        
+        # Get model type subdirectory (default to lowercase model_name if not in map)
+        model_type_dir = model_type_map.get(model_name, model_name.lower())
+        
+        # Create model type subdirectory
+        self.model_type_dir = os.path.join(self.base_dir, model_type_dir)
+        if not os.path.exists(self.model_type_dir):
+            os.makedirs(self.model_type_dir)
             
         self.process_tag = process_tag
         self.model_name = model_name
@@ -58,8 +79,13 @@ class ExperimentLogger:
         self.tuning_info = None  # will hold metadata about hyperparameter tuning
             
         # Determine Run Number (Ordinal)
-        # Scan existing folders to count how many times this model has been run
-        existing_runs = [d for d in os.listdir(self.base_dir) if d.startswith(f"{model_name}_")]
+        # Scan existing folders within model type directory to count how many times this model has been run
+        if os.path.exists(self.model_type_dir):
+            existing_runs = [d for d in os.listdir(self.model_type_dir) 
+                           if os.path.isdir(os.path.join(self.model_type_dir, d)) 
+                           and d.startswith(f"{model_name}_")]
+        else:
+            existing_runs = []
         run_count = len(existing_runs) + 1
         
         # Ordinal Suffix (1st, 2nd, 3rd, 4th...)
@@ -80,7 +106,7 @@ class ExperimentLogger:
         else:
             folder_name = f"{model_name}_{run_ordinal}_{process_tag}_{date_str}"
         
-        self.run_dir = os.path.join(self.base_dir, folder_name)
+        self.run_dir = os.path.join(self.model_type_dir, folder_name)
         os.makedirs(self.run_dir)
         
         print(f"Experiment logging to: {self.run_dir}")
@@ -130,7 +156,9 @@ class ExperimentLogger:
         # Determine Process Type for Header
         process_tag = self.process_tag
         
-        with open(summary_path, 'w') as f:
+        # Use explicit UTF-8 encoding to avoid Windows cp1252 UnicodeEncodeError
+        # when writing symbols like Greek letters (e.g., τ) in explanations.
+        with open(summary_path, 'w', encoding='utf-8') as f:
             f.write(f"# ML Run Summary\n\n")
             f.write(f"**Date**: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             
@@ -465,3 +493,173 @@ class ExperimentLogger:
         plt.grid(True)
         
         self.save_plot(fig, filename)
+    
+    def save_config_json(self, model_type, best_params=None):
+        """
+        Save all configuration and model parameters to a JSON file for reproducibility.
+        
+        Args:
+            model_type: The model type used (e.g., 'Ridge', 'LSTM', 'Transformer')
+            best_params: Optional dict of tuned hyperparameters
+        """
+        import json
+        
+        # Get all config attributes (excluding private and callable items)
+        config_dict = {}
+        config_module = __import__('ML.config', fromlist=[''])
+        
+        # Collect all relevant config parameters
+        for attr_name in dir(config_module):
+            if not attr_name.startswith('_') and not callable(getattr(config_module, attr_name, None)):
+                try:
+                    value = getattr(config_module, attr_name)
+                    # Only include JSON-serializable types
+                    if isinstance(value, (str, int, float, bool, list, tuple, dict, type(None))):
+                        # Convert tuples to lists for JSON
+                        if isinstance(value, tuple):
+                            value = list(value)
+                        config_dict[attr_name] = value
+                except:
+                    pass
+        
+        # Build the complete config snapshot
+        config_snapshot = {
+            'run_info': {
+                'model_name': self.model_name,
+                'process_tag': self.process_tag,
+                'loss_tag': self.loss_tag,
+                'run_dir': self.run_dir,
+                'timestamp': datetime.datetime.now().isoformat()
+            },
+            'data_config': {
+                'data_frequency': config_dict.get('DATA_FREQUENCY'),
+                'target_mode': config_dict.get('TARGET_MODE'),
+                'target_horizon_days': config_dict.get('TARGET_HORIZON_DAYS'),
+                'embargo_rows_daily': config_dict.get('EMBARGO_ROWS_DAILY'),
+                'embargo_rows_monthly': config_dict.get('EMBARGO_ROWS_MONTHLY'),
+                'test_start_date': config_dict.get('TEST_START_DATE'),
+                'train_start_date': config_dict.get('TRAIN_START_DATE'),
+                'train_window_years': config_dict.get('TRAIN_WINDOW_YEARS'),
+                'val_window_months': config_dict.get('VAL_WINDOW_MONTHS'),
+            },
+            'model_config': {
+                'model_type': model_type,
+                'target_scaling_mode': config_dict.get('TARGET_SCALING_MODE'),
+            },
+            'training_config': {
+                'loss_mode': config_dict.get('LOSS_MODE'),
+                'huber_delta': config_dict.get('HUBER_DELTA'),
+                'tail_alpha': config_dict.get('TAIL_ALPHA'),
+                'tail_threshold': config_dict.get('TAIL_THRESHOLD'),
+                'pred_clip': config_dict.get('PRED_CLIP'),
+            },
+            'hyperparameters': {}
+        }
+        
+        # Add model-specific hyperparameters
+        if model_type == 'Ridge':
+            config_snapshot['hyperparameters'] = {
+                'alpha_grid': config_dict.get('RIDGE_ALPHA_GRID'),
+                'feature_standardize_per_fold': config_dict.get('FEATURE_STANDARDIZE_PER_FOLD'),
+            }
+        elif model_type == 'RandomForest':
+            config_snapshot['hyperparameters'] = {
+                'n_estimators': config_dict.get('RF_N_ESTIMATORS'),
+                'max_depth': config_dict.get('RF_MAX_DEPTH'),
+                'min_samples_split': config_dict.get('RF_MIN_SAMPLES_SPLIT'),
+                'min_samples_leaf': config_dict.get('RF_MIN_SAMPLES_LEAF'),
+                'random_state': config_dict.get('RF_RANDOM_STATE'),
+            }
+        elif model_type == 'XGBoost':
+            config_snapshot['hyperparameters'] = {
+                'n_estimators': config_dict.get('XGB_N_ESTIMATORS'),
+                'learning_rate': config_dict.get('XGB_LEARNING_RATE'),
+                'max_depth': config_dict.get('XGB_MAX_DEPTH'),
+                'min_child_weight': config_dict.get('XGB_MIN_CHILD_WEIGHT'),
+                'subsample': config_dict.get('XGB_SUBSAMPLE'),
+                'colsample_bytree': config_dict.get('XGB_COLSAMPLE_BYTREE'),
+                'gamma': config_dict.get('XGB_GAMMA'),
+                'reg_alpha': config_dict.get('XGB_REG_ALPHA'),
+                'reg_lambda': config_dict.get('XGB_REG_LAMBDA'),
+            }
+        elif model_type == 'MLP':
+            config_snapshot['hyperparameters'] = {
+                'hidden_layers': config_dict.get('MLP_HIDDEN_LAYERS'),
+                'learning_rate_init': config_dict.get('MLP_LEARNING_RATE_INIT'),
+                'alpha': config_dict.get('MLP_ALPHA'),
+                'max_iter': config_dict.get('MLP_MAX_ITER'),
+            }
+        elif model_type == 'LSTM':
+            config_snapshot['hyperparameters'] = {
+                'time_steps': config_dict.get('LSTM_TIME_STEPS'),
+                'hidden_dim': config_dict.get('LSTM_HIDDEN_DIM'),
+                'layers': config_dict.get('LSTM_LAYERS'),
+                'epochs': config_dict.get('LSTM_EPOCHS'),
+                'batch_size': config_dict.get('LSTM_BATCH_SIZE'),
+                'learning_rate': config_dict.get('LSTM_LEARNING_RATE'),
+            }
+        elif model_type == 'CNN':
+            config_snapshot['hyperparameters'] = {
+                'time_steps': config_dict.get('CNN_TIME_STEPS'),
+                'filters': config_dict.get('CNN_FILTERS'),
+                'kernel_size': config_dict.get('CNN_KERNEL_SIZE'),
+                'layers': config_dict.get('CNN_LAYERS'),
+                'dropout': config_dict.get('CNN_DROPOUT'),
+                'epochs': config_dict.get('CNN_EPOCHS'),
+                'batch_size': config_dict.get('CNN_BATCH_SIZE'),
+                'learning_rate': config_dict.get('CNN_LEARNING_RATE'),
+            }
+        elif model_type == 'Transformer':
+            config_snapshot['hyperparameters'] = {
+                'time_steps': config_dict.get('TRANSFORMER_TIME_STEPS'),
+                'model_dim': config_dict.get('TRANSFORMER_MODEL_DIM'),
+                'feedforward_dim': config_dict.get('TRANSFORMER_FEEDFORWARD_DIM'),
+                'layers': config_dict.get('TRANSFORMER_LAYERS'),
+                'heads': config_dict.get('TRANSFORMER_HEADS'),
+                'dropout': config_dict.get('TRANSFORMER_DROPOUT'),
+                'epochs': config_dict.get('TRANSFORMER_EPOCHS'),
+                'batch_size': config_dict.get('TRANSFORMER_BATCH_SIZE'),
+                'learning_rate': config_dict.get('TRANSFORMER_LR'),
+                'weight_decay': config_dict.get('TRANSFORMER_WEIGHT_DECAY'),
+            }
+        
+        # Add tuned parameters if available
+        if best_params:
+            # Convert numpy types to native Python types for JSON serialization
+            import numpy as np
+            def convert_to_native(obj):
+                if isinstance(obj, np.integer):
+                    return int(obj)
+                elif isinstance(obj, np.floating):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, dict):
+                    return {k: convert_to_native(v) for k, v in obj.items()}
+                elif isinstance(obj, (list, tuple)):
+                    return [convert_to_native(item) for item in obj]
+                return obj
+            
+            config_snapshot['hyperparameters']['tuned_params'] = convert_to_native(best_params)
+        
+        # Add walk-forward specific config if applicable
+        if self.process_tag == 'WalkForward':
+            config_snapshot['walkforward_config'] = {
+                'val_months': config_dict.get('WF_VAL_MONTHS'),
+                'train_on_train_plus_val': config_dict.get('WF_TRAIN_ON_TRAIN_PLUS_VAL'),
+                'use_tuned_params': config_dict.get('WF_USE_TUNED_PARAMS'),
+                'early_stopping': config_dict.get('WF_EARLY_STOPPING'),
+                'patience': config_dict.get('WF_PATIENCE'),
+                'grad_clip_norm': config_dict.get('WF_GRAD_CLIP_NORM'),
+                'tune_threshold': config_dict.get('WF_TUNE_THRESHOLD'),
+                'threshold_criterion': config_dict.get('WF_THRESHOLD_CRITERION'),
+                'threshold_n_grid': config_dict.get('WF_THRESHOLD_N_GRID'),
+                'threshold_min_trade_frac': config_dict.get('WF_THRESHOLD_MIN_TRADE_FRAC'),
+            }
+        
+        # Save to JSON file
+        json_path = os.path.join(self.run_dir, "config.json")
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(config_snapshot, f, indent=2, ensure_ascii=False)
+        
+        print(f"Configuration saved to {json_path}")

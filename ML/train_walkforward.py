@@ -28,17 +28,20 @@ def main():
     print(f"Dataset: frequency={frequency}, embargo_rows={embargo_rows}")
     
     # 2. Setup Splitter with frequency-aware configuration
-    # We start testing from TEST_START_DATE (2023-01-01)
-    # We step forward by 1 month.
+    # For monthly data, use larger step (3 months) to ensure enough test samples
+    # For daily data, step_months=1 is fine
+    step_months = 3 if frequency == "monthly" else 1
+    
     splitter = data_prep.WalkForwardSplitter(
         start_date=config.TEST_START_DATE,
         train_years=config.TRAIN_WINDOW_YEARS,
         val_months=config.WF_VAL_MONTHS,  # Use walk-forward specific val_months
         embargo_rows=embargo_rows,
-        step_months=1,
+        step_months=step_months,
         train_start_date=config.TRAIN_START_DATE,
         frequency=frequency
     )
+    print(f"Walk-forward step: {step_months} months")
     
     # Load tuned hyperparameters if configured
     if config.WF_USE_TUNED_PARAMS and config.WF_BEST_PARAMS_PATH:
@@ -205,6 +208,12 @@ def main():
     splits = list(splitter.split(df))
     total_folds = len(splits)
     
+    # Collect predictions and actuals for train, val, and test sets
+    all_train_preds = []
+    all_train_actuals = []
+    all_val_preds = []
+    all_val_actuals = []
+    
     for fold, train_idx, val_idx, test_idx in splits:
         print(f"\n=== Fold {fold+1}/{total_folds} ===")
         # Prepare Data
@@ -224,6 +233,10 @@ def main():
             X_train = pd.concat([X_train, X_val_orig])
             y_train = pd.concat([y_train, y_val_orig])
             has_val_set = False  # No longer have separate val set
+        
+        # Initialize train predictions/actuals (will be set in both branches)
+        y_train_pred = None
+        y_train_actual = None
         
         # Train
         if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
@@ -453,6 +466,13 @@ def main():
             # 7. Predict and Unscale
             model.eval()
             with torch.no_grad():
+                # Predict on train set
+                X_train_tensor = torch.tensor(X_train_seq, dtype=torch.float32)
+                y_train_pred_scaled = model(X_train_tensor).numpy().flatten()
+                y_train_pred = y_train_pred_scaled * y_std + y_mean
+                y_train_actual = y_train.iloc[time_steps-1:].values
+                
+                # Predict on test set
                 X_test_tensor = torch.tensor(X_test_seq, dtype=torch.float32)
                 y_pred_scaled = model(X_test_tensor).numpy().flatten()
             
@@ -552,6 +572,10 @@ def main():
             model_params = resolve_model_params(config.MODEL_TYPE, best_params)
             model = models.ModelFactory.get_model(config.MODEL_TYPE, overrides=model_params)
             model.fit(X_train, y_train)
+            
+            # Predict on train, val, and test sets
+            y_train_pred = model.predict(X_train)
+            y_train_actual = y_train.values if hasattr(y_train, 'values') else y_train
             y_pred = model.predict(X_test)
             
             # --- Compute Validation Metrics for standard ML if val set is available ---
@@ -560,9 +584,17 @@ def main():
                 y_val_pred = model.predict(X_val_orig)
                 y_val_actual = y_val_orig.values
         
-        # Store
+        # Store predictions and actuals
+        if y_train_pred is not None and y_train_actual is not None:
+            all_train_preds.extend(y_train_pred)
+            all_train_actuals.extend(y_train_actual)
         all_preds.extend(y_pred)
         all_actuals.extend(y_test)
+        
+        # Store validation predictions if available
+        if y_val_pred is not None and y_val_actual is not None:
+            all_val_preds.extend(y_val_pred)
+            all_val_actuals.extend(y_val_actual)
         
         # Compute per-fold metrics
         y_test_arr = np.array(y_test) if hasattr(y_test, 'values') else y_test
@@ -753,16 +785,37 @@ def main():
             title=f"Threshold-Tuned Thresholded Policy (criterion={config.WF_THRESHOLD_CRITERION})"
         )
     
-    # 4. Plot
+    # 4. Plot - Test Set (keep original filename for backward compatibility)
     fig = plt.figure(figsize=(12, 6))
     plt.plot(all_actuals, label='Actual', alpha=0.7)
     plt.plot(all_preds, label='Predicted (Walk-Forward)', alpha=0.7)
-    plt.title(f"Walk-Forward Validation: {config.MODEL_TYPE}")
+    plt.title(f"Walk-Forward Test Set: {config.MODEL_TYPE}")
     plt.legend()
     plt.grid(True)
-    
-    # Log Results
     logger.save_plot(fig, filename="forecast_plot_walkforward.png")
+    
+    # Also save with explicit test suffix
+    logger.save_plot(fig, filename="forecast_plot_walkforward_test.png")
+    
+    # Plot - Train Set
+    if len(all_train_preds) > 0 and len(all_train_actuals) > 0:
+        fig = plt.figure(figsize=(12, 6))
+        plt.plot(all_train_actuals, label='Actual', alpha=0.7)
+        plt.plot(all_train_preds, label='Predicted', alpha=0.7)
+        plt.title(f"Walk-Forward Train Set: {config.MODEL_TYPE}")
+        plt.legend()
+        plt.grid(True)
+        logger.save_plot(fig, filename="forecast_plot_walkforward_train.png")
+    
+    # Plot - Validation Set
+    if len(all_val_preds) > 0 and len(all_val_actuals) > 0:
+        fig = plt.figure(figsize=(12, 6))
+        plt.plot(all_val_actuals, label='Actual', alpha=0.7)
+        plt.plot(all_val_preds, label='Predicted', alpha=0.7)
+        plt.title(f"Walk-Forward Validation Set: {config.MODEL_TYPE}")
+        plt.legend()
+        plt.grid(True)
+        logger.save_plot(fig, filename="forecast_plot_walkforward_val.png")
     
     # Construct metrics dicts for logger
     metrics_test = {
@@ -822,6 +875,9 @@ def main():
         }
     else:
         metrics_test['threshold_tuning'] = {'enabled': False}
+    
+    # Save configuration JSON for reproducibility
+    logger.save_config_json(config.MODEL_TYPE, best_params)
     
     # Log summary with diagnostics
     logger.log_summary(

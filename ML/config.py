@@ -64,9 +64,22 @@ def get_embargo_rows(frequency=None):
 EMBARGO_ROWS = EMBARGO_ROWS_DAILY if DATA_FREQUENCY == "daily" else EMBARGO_ROWS_MONTHLY
 
 # Model Parameters
-# Options: 'LinearRegression', 'RandomForest', 'XGBoost', 'MLP', 'LSTM', 'CNN'
-MODEL_TYPE = 'XGBoost'
+# Options: 'LinearRegression', 'RandomForest', 'XGBoost', 'MLP', 'LSTM', 'CNN', 'Transformer', 'Ridge'
+MODEL_TYPE = 'Ridge'
 BASIC_MODEL_SUITE = ['LinearRegression', 'RandomForest', 'XGBoost', 'MLP']
+
+# Ridge Regression
+# Alpha grid for walk-forward CV hyperparameter selection using val Spearman IC
+RIDGE_ALPHA_GRID = [1, 10, 50, 100, 300, 1000]
+
+# Feature Scaling
+# Enable per-fold feature standardization using training-set statistics only
+FEATURE_STANDARDIZE_PER_FOLD = True
+
+# Strategy Policy Evaluation
+# Enable evaluation of thresholded and continuous sizing strategies
+EVAL_THRESHOLDED_POLICY = True
+EVAL_CONTINUOUS_SIZING_POLICY = True
 
 # Random Forest Params
 RF_N_ESTIMATORS = 100
@@ -94,12 +107,13 @@ MLP_ALPHA = 0.0001
 MLP_MAX_ITER = 500
 
 # LSTM Params
-LSTM_TIME_STEPS = 10  # default fallback for training if not overridden
-LSTM_LOOKBACK_CANDIDATES = [5, 10, 20, 30, 45, 60]  # Optuna search space
-LSTM_HIDDEN_DIM = 32
-LSTM_LAYERS = 1
+# Chosen for daily data with 21d horizon: moderate capacity, stable training
+LSTM_TIME_STEPS = 20  # lookback window (days) for sequence creation
+LSTM_LOOKBACK_CANDIDATES = [10, 20, 30, 45, 60]  # Optuna search space
+LSTM_HIDDEN_DIM = 64
+LSTM_LAYERS = 2
 LSTM_EPOCHS = 50
-LSTM_BATCH_SIZE = 32
+LSTM_BATCH_SIZE = 64
 LSTM_LEARNING_RATE = 0.001
 
 # CNN Params
@@ -115,20 +129,22 @@ CNN_BATCH_SIZE = 32
 CNN_LEARNING_RATE = 0.001
 
 # Transformer Params
-TRANSFORMER_TIME_STEPS = 20  # Default time steps for Transformer
+# TRANSFORMER_TIME_STEPS: For monthly data (190 samples), use short lookback
+# to ensure enough sequences per fold. For daily data, can use 12-20.
+TRANSFORMER_TIME_STEPS = 3  # 3 months lookback for monthly frequency
 TRANSFORMER_LOOKBACK_CANDIDATES = [10, 20, 30, 45, 60]  # Optuna search space
-TRANSFORMER_MODEL_DIM = 64
-TRANSFORMER_FEEDFORWARD_DIM = 128
+TRANSFORMER_MODEL_DIM = 32
+TRANSFORMER_FEEDFORWARD_DIM = 64
 TRANSFORMER_LAYERS = 2
 TRANSFORMER_HEADS = 4
-TRANSFORMER_DROPOUT = 0.1
+TRANSFORMER_DROPOUT = 0.25
 TRANSFORMER_EPOCHS = 50
 TRANSFORMER_BATCH_SIZE = 32
-TRANSFORMER_LR = 3e-4  # Conservative LR for stability
-TRANSFORMER_WEIGHT_DECAY = 1e-4
+TRANSFORMER_LR = 1e-4           # Conservative LR for overnight stability
+TRANSFORMER_WEIGHT_DECAY = 1e-2
 
 # Optuna Tuning
-USE_OPTUNA = True
+USE_OPTUNA = False
 OPTUNA_TRIALS = 20
 
 # Hyperparameter tuning (walk-forward CV) configuration
@@ -153,7 +169,7 @@ WF_GRAD_CLIP_NORM = 1.0
 
 # Early Stopping Configuration (NEW)
 WF_EARLY_STOPPING = True         # Enable safety net
-WF_PATIENCE = 15                 # Stop if val loss doesn't improve for 15 epochs
+WF_PATIENCE = 10                 # Stop if val loss doesn't improve for 10 epochs
 
 # ===============================
 # Threshold Tuning (Anti-Policy-Overfit)
@@ -171,12 +187,12 @@ WF_THRESHOLD_VOL_TARGETING = False # Apply volatility targeting during threshold
 # Target Scaling (Deep Models)
 # ===============================
 TARGET_SCALING_MODE = "standardize"  # "standardize": (y - mean) / std
-                                   # "vol_scale": y / std (keeps 0 at 0)
+                                     # "vol_scale": y / std (keeps 0 at 0)
 
 # ===============================
 # Loss Function Configuration
 # ===============================
-LOSS_MODE = "mse"               # Options: "mse", "huber", "tail_weighted"
+LOSS_MODE = "huber"             # Options: "mse", "huber", "tail_weighted"
 HUBER_DELTA = 1.0               # Used only if LOSS_MODE == "huber"
 TAIL_ALPHA = 0.0                # Used only if LOSS_MODE == "tail_weighted" (0.0 = disabled)
 TAIL_THRESHOLD = 0.03           # Absolute return threshold for big moves

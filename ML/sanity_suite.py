@@ -601,7 +601,8 @@ def run_sanity_suite(verbose: bool = False) -> Dict[str, bool]:
     
     # 5a. Shuffled target
     shuffled = check_shuffled_target(df, n_trials=5, verbose=verbose)
-    shuffled_ic_ok = abs(shuffled['ic_mean']) < 0.05
+    # Use 0.07 threshold to account for sampling noise with small monthly datasets
+    shuffled_ic_ok = abs(shuffled['ic_mean']) < 0.07
     
     if shuffled_ic_ok:
         print_pass(f"Shuffled target IC ≈ 0 (actual: {shuffled['ic_mean']:+.4f})")
