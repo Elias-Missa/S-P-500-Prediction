@@ -3,6 +3,22 @@ import pandas as pd
 from scipy.stats import spearmanr
 import torch
 
+from . import config
+
+
+def get_annualization_factor(frequency=None):
+    """
+    Get the appropriate annualization factor based on data frequency.
+    
+    Args:
+        frequency: "daily" or "monthly" (defaults to config.DATA_FREQUENCY)
+        
+    Returns:
+        int: 252 for daily, 12 for monthly
+    """
+    freq = frequency or getattr(config, 'DATA_FREQUENCY', 'daily')
+    return 252 if freq == "daily" else 12
+
 
 def tail_weighted_mse(y_pred, y_true, threshold=0.03, alpha=4.0):
     """
@@ -34,7 +50,7 @@ def calculate_ic(y_true, y_pred):
     corr, _ = spearmanr(y_true, y_pred)
     return corr
 
-def calculate_strategy_metrics(y_true, y_pred, pred_clip=None):
+def calculate_strategy_metrics(y_true, y_pred, pred_clip=None, frequency=None):
     """
     Simulates a simple Long/Short strategy based on prediction sign.
     Returns a dictionary of metrics.
@@ -44,6 +60,7 @@ def calculate_strategy_metrics(y_true, y_pred, pred_clip=None):
         y_pred: Predicted returns
         pred_clip: If not None, clip predictions to [-pred_clip, pred_clip] 
                    before computing signals (for strategy only)
+        frequency: "daily" or "monthly" for annualization (defaults to config.DATA_FREQUENCY)
     """
     y_pred_strat = np.array(y_pred)
     if pred_clip is not None:
@@ -57,24 +74,21 @@ def calculate_strategy_metrics(y_true, y_pred, pred_clip=None):
     # Cumulative Return
     total_return = np.sum(strategy_returns)
     
-    # Sharpe Ratio (Annualized)
-    # Assuming daily returns, but our target is 1-month return. 
-    # If y_true is 1-month return, then we have 1 data point per month (if non-overlapping) 
-    # or overlapping daily data points of 1-month returns.
-    # If overlapping, std dev is understated. 
-    # For simplicity, we'll calculate Sharpe based on the frequency of predictions.
-    # If predictions are monthly (step=1 month), then annualized = sqrt(12).
+    # Sharpe Ratio (Annualized based on frequency)
+    # daily: scale by sqrt(252)
+    # monthly: scale by sqrt(12)
+    ann_factor = get_annualization_factor(frequency)
+    
     mean_ret = np.mean(strategy_returns)
     std_ret = np.std(strategy_returns)
     
     if std_ret == 0:
         sharpe = 0.0
     else:
-        sharpe = (mean_ret / std_ret) * np.sqrt(12) # Assuming monthly steps
+        sharpe = (mean_ret / std_ret) * np.sqrt(ann_factor)
         
     # Max Drawdown
     # Construct compounded equity curve
-    # equity = (1 + strategy_returns).cumprod()
     equity_curve = np.cumprod(1 + strategy_returns)
     peak = np.maximum.accumulate(equity_curve)
     drawdown = (equity_curve - peak) / peak
@@ -83,11 +97,12 @@ def calculate_strategy_metrics(y_true, y_pred, pred_clip=None):
     return {
         'total_return': total_return,
         'sharpe': sharpe,
-        'max_drawdown': max_dd
+        'max_drawdown': max_dd,
+        'annualization_factor': ann_factor
     }
 
 
-def calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=0.03, pred_clip=None):
+def calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=0.03, pred_clip=None, frequency=None):
     """
     Simulates a strategy that only trades when a big move is predicted.
     
@@ -101,6 +116,7 @@ def calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=0.03, pred_clip
         threshold: Absolute return threshold for entering a position
         pred_clip: If not None, clip predictions to [-pred_clip, pred_clip] 
                    before computing signals (for strategy only)
+        frequency: "daily" or "monthly" for annualization (defaults to config.DATA_FREQUENCY)
         
     Returns:
         Dictionary with strategy performance metrics
@@ -128,6 +144,9 @@ def calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=0.03, pred_clip
     trade_count = np.sum(trade_mask)
     holding_frequency = trade_count / n_periods if n_periods > 0 else 0.0
     
+    # Get annualization factor based on frequency
+    ann_factor = get_annualization_factor(frequency)
+    
     # Only compute metrics on periods where we traded
     if trade_count == 0:
         return {
@@ -138,27 +157,28 @@ def calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=0.03, pred_clip
             'max_drawdown': 0.0,
             'trade_count': 0,
             'holding_frequency': 0.0,
-            'avg_return_per_trade': 0.0
+            'avg_return_per_trade': 0.0,
+            'annualization_factor': ann_factor
         }
     
     # Total and average return
     total_return = np.sum(strategy_returns)
     avg_return_per_trade = np.mean(strategy_returns[trade_mask])
     
-    # Annualized metrics (assuming monthly data points)
-    # Annualized return: compound the average monthly return
-    mean_monthly = np.mean(strategy_returns)  # includes flat periods as 0
-    ann_return = mean_monthly * 12  # Simple annualization
+    # Annualized metrics based on frequency
+    # daily: 252 periods/year, monthly: 12 periods/year
+    mean_period = np.mean(strategy_returns)  # includes flat periods as 0
+    ann_return = mean_period * ann_factor  # Simple annualization
     
     # Annualized volatility
-    std_monthly = np.std(strategy_returns)
-    ann_volatility = std_monthly * np.sqrt(12)
+    std_period = np.std(strategy_returns)
+    ann_volatility = std_period * np.sqrt(ann_factor)
     
     # Sharpe ratio
-    if std_monthly == 0:
+    if std_period == 0:
         sharpe = 0.0
     else:
-        sharpe = (mean_monthly / std_monthly) * np.sqrt(12)
+        sharpe = (mean_period / std_period) * np.sqrt(ann_factor)
     
     # Max drawdown on equity curve
     # Start with $1, flat periods earn 0
@@ -175,7 +195,8 @@ def calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=0.03, pred_clip
         'max_drawdown': max_dd,
         'trade_count': int(trade_count),
         'holding_frequency': holding_frequency,
-        'avg_return_per_trade': avg_return_per_trade
+        'avg_return_per_trade': avg_return_per_trade,
+        'annualization_factor': ann_factor
     }
 
 

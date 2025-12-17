@@ -49,7 +49,7 @@ class HyperparameterTuner:
         train_years = getattr(config, 'TUNE_TRAIN_YEARS', 5)
         val_months = getattr(config, 'TUNE_VAL_MONTHS', 6)
         step_months = getattr(config, 'TUNE_STEP_MONTHS', 6)
-        buffer_days = getattr(config, 'TUNE_BUFFER_DAYS', 21)
+        embargo_rows = getattr(config, 'TUNE_EMBARGO_ROWS', 21)
         max_folds = getattr(config, 'TUNE_MAX_FOLDS', 10)
         
         # Restrict data to tuning window
@@ -64,12 +64,14 @@ class HyperparameterTuner:
         # Use WalkForwardSplitter to generate folds
         # The splitter yields (fold, train_idx, val_idx, test_idx)
         # For tuning, we'll use val_idx as our validation and ignore test_idx
+        frequency = getattr(config, 'DATA_FREQUENCY', 'daily')
         splitter = data_prep.WalkForwardSplitter(
             start_date=tune_start + pd.DateOffset(years=train_years) + pd.DateOffset(months=val_months),
             train_years=train_years,
             val_months=val_months,
-            buffer_days=buffer_days,
-            step_months=step_months
+            embargo_rows=embargo_rows,
+            step_months=step_months,
+            frequency=frequency
         )
         
         # Create a combined dataframe for the splitter

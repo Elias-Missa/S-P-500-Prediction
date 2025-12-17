@@ -163,7 +163,7 @@ def train_bigmove_classifier(target_col='BigMove'):
         test_start_date=config.TEST_START_DATE,
         train_years=config.TRAIN_WINDOW_YEARS,
         val_months=config.VAL_WINDOW_MONTHS,
-        buffer_days=config.BUFFER_DAYS,
+        embargo_rows=config.EMBARGO_ROWS,
         train_start_date=config.TRAIN_START_DATE
     )
     
@@ -350,7 +350,7 @@ def log_classifier_summary(logger, target_col, metrics_train, metrics_val, metri
         f.write(f"- **Test Start**: {config.TEST_START_DATE}\n")
         f.write(f"- **Train Window**: {config.TRAIN_WINDOW_YEARS} years\n")
         f.write(f"- **Val Window**: {config.VAL_WINDOW_MONTHS} months\n")
-        f.write(f"- **Buffer**: {config.BUFFER_DAYS} days\n\n")
+        f.write(f"- **Embargo**: {config.EMBARGO_ROWS} rows (trading days)\n\n")
         
         f.write("## Metrics Explanation\n")
         f.write("- **Precision**: When we predict BigMove, how often is it actually a BigMove?\n")

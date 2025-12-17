@@ -165,16 +165,21 @@ def main():
     loss_tag = config.LOSS_MODE.upper()
     logger = utils.ExperimentLogger(model_name=config.MODEL_TYPE, process_tag="Static", loss_tag=loss_tag)
 
-    # 1. Load Data
-    df = data_prep.load_and_prep_data()
+    # 1. Load Data using dataset_builder for proper frequency handling
+    df, metadata = data_prep.load_dataset(use_builder=True)
     
-    # 2. Split Data
+    # Extract dataset configuration
+    frequency = metadata['frequency'] if metadata else 'daily'
+    embargo_rows = metadata['embargo_rows'] if metadata else config.EMBARGO_ROWS
+    
+    # 2. Split Data with frequency-aware splitter
     splitter = data_prep.RollingWindowSplitter(
         test_start_date=config.TEST_START_DATE,
         train_years=config.TRAIN_WINDOW_YEARS,
         val_months=config.VAL_WINDOW_MONTHS,
-        buffer_days=config.BUFFER_DAYS,
-        train_start_date=config.TRAIN_START_DATE
+        embargo_rows=embargo_rows,
+        train_start_date=config.TRAIN_START_DATE,
+        frequency=frequency
     )
     
     train_idx, val_idx, test_idx = splitter.get_split(df)

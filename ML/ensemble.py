@@ -16,21 +16,40 @@ def train_ensemble():
     # Initialize Logger
     logger = utils.ExperimentLogger(model_name="Ensemble", process_tag="WalkForward", loss_tag="MSE")
     
-    # 1. Load Data
-    df = data_prep.load_and_prep_data()
+    # 1. Load Data (need raw data for daily returns)
+    print(f"Loading data from {config.DATA_PATH}...")
+    df_raw = pd.read_csv(config.DATA_PATH, index_col=0, parse_dates=True)
+    df_raw.sort_index(inplace=True)
     
-    # 2. Setup Walk-Forward Splitter (Same as individual runs)
+    # Calculate DAILY returns for strategy backtesting BEFORE data_prep drops SPY_Price
+    if 'SPY_Price' in df_raw.columns:
+        df_raw['Daily_Return'] = df_raw['SPY_Price'].pct_change()
+    else:
+        raise ValueError("SPY_Price needed for daily returns calculation")
+    
+    # Load prepped data using dataset_builder for proper frequency handling
+    df, metadata = data_prep.load_dataset(use_builder=True)
+    
+    # Extract dataset configuration
+    frequency = metadata['frequency'] if metadata else 'daily'
+    embargo_rows = metadata['embargo_rows'] if metadata else config.EMBARGO_ROWS
+    
+    # Merge daily returns back (they're not in prepped data)
+    df['Daily_Return'] = df_raw.loc[df.index, 'Daily_Return']
+    
+    # 2. Setup Walk-Forward Splitter with frequency-aware configuration
     splitter = data_prep.WalkForwardSplitter(
         start_date=config.TEST_START_DATE,
         train_years=config.TRAIN_WINDOW_YEARS,
         val_months=config.WF_VAL_MONTHS,
-        buffer_days=config.BUFFER_DAYS,
+        embargo_rows=embargo_rows,
         step_months=1,
-        train_start_date=config.TRAIN_START_DATE  # Use expanding window like train_walkforward.py
+        train_start_date=config.TRAIN_START_DATE,  # Use expanding window like train_walkforward.py
+        frequency=frequency
     )
     
     target_col = config.TARGET_COL
-    feature_cols = [c for c in df.columns if c not in [target_col, 'BigMove', 'BigMoveUp', 'BigMoveDown']]
+    feature_cols = [c for c in df.columns if c not in [target_col, 'BigMove', 'BigMoveUp', 'BigMoveDown', 'Daily_Return']]
     
     # Storage
     predictions = {
@@ -241,7 +260,10 @@ def train_ensemble():
 
     # --- RESULTS & RISK OVERLAY ---
     res_df = pd.DataFrame(predictions, index=dates)
-    res_df['Actual'] = actuals
+    res_df['Actual'] = actuals  # 1-month forward return (for directional accuracy)
+    
+    # Merge daily returns for strategy calculation
+    res_df['Daily_Return'] = df.loc[res_df.index, 'Daily_Return']
     
     # 1. Calc Raw Performance (exclude NaN for individual model metrics)
     valid_mask = ~np.isnan(res_df['Ensemble'])
@@ -267,29 +289,29 @@ def train_ensemble():
     print(f"  Information Coefficient (IC): {ic:.4f}")
     
     # 2. Apply Volatility Targeting (The Risk Engine)
-    # Target 15% Volatility
+    # Target 15% Volatility (annualized)
     TARGET_VOL = 0.15
-    # Calculate rolling realized vol of the ASSET (SPY)
-    # Use 6-month rolling window for faster adaptation (was 12)
-    rolling_vol = res_df['Actual'].rolling(6, min_periods=3).std() * np.sqrt(12)
+    # Calculate rolling realized vol using DAILY returns (63 trading days = ~3 months)
+    # Annualize by sqrt(252)
+    rolling_vol = res_df['Daily_Return'].rolling(63, min_periods=21).std() * np.sqrt(252)
     rolling_vol = rolling_vol.fillna(0.15)  # Default to target vol
     
     # Vol Scalar: If market vol > 15%, scale down. If < 15%, scale up (max 2.0).
     vol_scalar = (TARGET_VOL / rolling_vol).clip(0.5, 2.0).shift(1).fillna(1.0)
     
-    # Strategy Returns
+    # Strategy Returns using DAILY returns (not overlapping monthly!)
     res_df['Signal_Raw'] = np.sign(res_df['Ensemble'])
-    res_df['Ret_Raw'] = res_df['Signal_Raw'] * res_df['Actual']
+    res_df['Ret_Raw'] = res_df['Signal_Raw'] * res_df['Daily_Return']
     res_df['Ret_VolTarget'] = res_df['Ret_Raw'] * vol_scalar
     
-    # Metrics
+    # Metrics using DAILY returns (annualize by sqrt(252))
     cum_raw = (1 + res_df['Ret_Raw']).cumprod()
     cum_vol = (1 + res_df['Ret_VolTarget']).cumprod()
-    cum_bh = (1 + res_df['Actual']).cumprod()
+    cum_bh = (1 + res_df['Daily_Return']).cumprod()  # Buy & Hold uses daily returns too
     
-    sharpe_raw = res_df['Ret_Raw'].mean() / res_df['Ret_Raw'].std() * np.sqrt(12) if res_df['Ret_Raw'].std() > 0 else 0
-    sharpe_vol = res_df['Ret_VolTarget'].mean() / res_df['Ret_VolTarget'].std() * np.sqrt(12) if res_df['Ret_VolTarget'].std() > 0 else 0
-    sharpe_bh = res_df['Actual'].mean() / res_df['Actual'].std() * np.sqrt(12) if res_df['Actual'].std() > 0 else 0
+    sharpe_raw = res_df['Ret_Raw'].mean() / res_df['Ret_Raw'].std() * np.sqrt(252) if res_df['Ret_Raw'].std() > 0 else 0
+    sharpe_vol = res_df['Ret_VolTarget'].mean() / res_df['Ret_VolTarget'].std() * np.sqrt(252) if res_df['Ret_VolTarget'].std() > 0 else 0
+    sharpe_bh = res_df['Daily_Return'].mean() / res_df['Daily_Return'].std() * np.sqrt(252) if res_df['Daily_Return'].std() > 0 else 0
     
     dd_raw = (cum_raw / cum_raw.cummax() - 1).min()
     dd_vol = (cum_vol / cum_vol.cummax() - 1).min()
@@ -320,15 +342,15 @@ def train_ensemble():
     ax1.grid(True, alpha=0.3)
     ax1.axhline(y=1, color='gray', linestyle='-', alpha=0.3)
     
-    # Bottom: Rolling Sharpe (6-month)
+    # Bottom: Rolling Sharpe (63 trading days = ~3 months)
     ax2 = axes[1]
-    roll_sharpe_ens = res_df['Ret_VolTarget'].rolling(6).mean() / res_df['Ret_VolTarget'].rolling(6).std() * np.sqrt(12)
-    roll_sharpe_bh = res_df['Actual'].rolling(6).mean() / res_df['Actual'].rolling(6).std() * np.sqrt(12)
+    roll_sharpe_ens = res_df['Ret_VolTarget'].rolling(63).mean() / res_df['Ret_VolTarget'].rolling(63).std() * np.sqrt(252)
+    roll_sharpe_bh = res_df['Daily_Return'].rolling(63).mean() / res_df['Daily_Return'].rolling(63).std() * np.sqrt(252)
     ax2.plot(roll_sharpe_bh.index, roll_sharpe_bh.values, label='Buy & Hold', linestyle='--', alpha=0.6)
     ax2.plot(roll_sharpe_ens.index, roll_sharpe_ens.values, label='Ensemble (Vol Targeted)', linewidth=1.5)
     ax2.axhline(y=0, color='red', linestyle='-', alpha=0.3)
     ax2.axhline(y=1, color='green', linestyle='--', alpha=0.3, label='Sharpe = 1')
-    ax2.set_title("Rolling 6-Month Sharpe Ratio", fontsize=14)
+    ax2.set_title("Rolling 3-Month Sharpe Ratio", fontsize=14)
     ax2.set_ylabel("Sharpe Ratio")
     ax2.legend(loc='upper left')
     ax2.grid(True, alpha=0.3)

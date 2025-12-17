@@ -8,18 +8,26 @@ from ML.train import evaluate, resolve_model_params
 
 def run_benchmark():
     """Train and compare a suite of baseline models on a shared split."""
-    df = data_prep.load_and_prep_data()
+    # Load data using dataset_builder for proper frequency handling
+    df, metadata = data_prep.load_dataset(use_builder=True)
+    
+    # Extract dataset configuration
+    frequency = metadata['frequency'] if metadata else 'daily'
+    embargo_rows = metadata['embargo_rows'] if metadata else config.EMBARGO_ROWS
+    
     splitter = data_prep.RollingWindowSplitter(
         test_start_date=config.TEST_START_DATE,
         train_years=config.TRAIN_WINDOW_YEARS,
         val_months=config.VAL_WINDOW_MONTHS,
-        buffer_days=config.BUFFER_DAYS,
-        train_start_date=config.TRAIN_START_DATE
+        embargo_rows=embargo_rows,
+        train_start_date=config.TRAIN_START_DATE,
+        frequency=frequency
     )
     train_idx, val_idx, test_idx = splitter.get_split(df)
 
     target_col = config.TARGET_COL
-    feature_cols = [c for c in df.columns if c != target_col]
+    exclude_cols = [target_col, 'BigMove', 'BigMoveUp', 'BigMoveDown']
+    feature_cols = [c for c in df.columns if c not in exclude_cols]
 
     X_train, y_train = df.loc[train_idx, feature_cols], df.loc[train_idx, target_col]
     X_val, y_val = df.loc[val_idx, feature_cols], df.loc[val_idx, target_col]

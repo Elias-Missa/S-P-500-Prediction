@@ -172,7 +172,7 @@ class ExperimentLogger:
                 # Walk-forward specific configuration
                 f.write(f"- **Train Window**: {config.TRAIN_WINDOW_YEARS} years\n")
                 f.write(f"- **Val Window**: {config.WF_VAL_MONTHS} months\n")
-                f.write(f"- **Buffer**: {config.BUFFER_DAYS} days (Embargo to prevent leakage)\n")
+                f.write(f"- **Embargo**: {config.EMBARGO_ROWS} rows (trading days to prevent leakage)\n")
                 f.write(f"- **Test Start**: {config.TEST_START_DATE}\n")
                 f.write(f"- **Train on Train+Val**: {config.WF_TRAIN_ON_TRAIN_PLUS_VAL}\n")
                 f.write(f"- **Use Tuned Params**: {config.WF_USE_TUNED_PARAMS}\n")
@@ -180,7 +180,7 @@ class ExperimentLogger:
                 # Static validation configuration
                 f.write(f"- **Train Window**: {config.TRAIN_WINDOW_YEARS} years\n")
                 f.write(f"- **Val Window**: {config.VAL_WINDOW_MONTHS} months\n")
-                f.write(f"- **Buffer**: {config.BUFFER_DAYS} days (Embargo to prevent leakage)\n")
+                f.write(f"- **Embargo**: {config.EMBARGO_ROWS} rows (trading days to prevent leakage)\n")
                 f.write(f"- **Test Start**: {config.TEST_START_DATE}\n")
             f.write("\n")
             

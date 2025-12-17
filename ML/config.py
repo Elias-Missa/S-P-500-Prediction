@@ -7,8 +7,40 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_PATH = os.path.join(REPO_ROOT, 'Output', 'final_features_with_target.csv')
 QUALITY_REPORT_PATH = os.path.join(REPO_ROOT, 'Output', 'data_quality_report.csv')
 
-# Target Definition
-TARGET_HORIZON = 21  # 1 Month (Trading Days)
+# ===============================
+# Dataset Frequency & Target Configuration
+# ===============================
+# DATA_FREQUENCY: "daily" uses all trading days, "monthly" uses month-end observations
+DATA_FREQUENCY = "daily"  # Options: "daily", "monthly"
+
+# TARGET_MODE: How to define the target variable
+#   - "forward_21d": Use price 21 trading days ahead (classic forward return)
+#   - "next_month": Use next month-end price (for monthly frequency)
+TARGET_MODE = "forward_21d"  # Options: "forward_21d", "next_month"
+
+# TARGET_HORIZON_DAYS: Number of trading days for forward target (used in "forward_21d" mode)
+TARGET_HORIZON_DAYS = 21
+
+# MONTHLY_ANCHOR: How to select monthly observation dates
+#   - "month_end": Last trading day of each month
+MONTHLY_ANCHOR = "month_end"  # Options: "month_end"
+
+# ===============================
+# Embargo Configuration (Row-Based)
+# ===============================
+# Embargo is always applied by row count (index positions), not calendar days.
+# The embargo should be >= target horizon in the respective frequency.
+EMBARGO_MODE = "rows"  # Always "rows" - embargo by row count
+
+# Embargo for daily frequency: 21 rows = 21 trading days = ~1 month
+EMBARGO_ROWS_DAILY = 21
+
+# Embargo for monthly frequency: 1 row = 1 month (since each row is month-end)
+EMBARGO_ROWS_MONTHLY = 1
+
+# Legacy alias for backward compatibility (computed based on frequency)
+# This is dynamically set based on DATA_FREQUENCY
+TARGET_HORIZON = TARGET_HORIZON_DAYS  # Legacy alias
 TARGET_COL = 'Target_1M'
 
 # Big-move configuration
@@ -20,7 +52,16 @@ TEST_START_DATE = '2023-01-01'
 TRAIN_START_DATE = '2010-01-01' # If set, overrides TRAIN_WINDOW_YEARS for an Expanding Window
 TRAIN_WINDOW_YEARS = 10 # Default rolling window if TRAIN_START_DATE is None
 VAL_WINDOW_MONTHS = 6
-BUFFER_DAYS = 21  # Embargo period to prevent leakage (should be >= TARGET_HORIZON)
+
+# Embargo Rows: Dynamically computed based on DATA_FREQUENCY
+# This ensures proper separation: if train ends at row i, val/test begins at row i + EMBARGO_ROWS + 1.
+def get_embargo_rows(frequency=None):
+    """Get embargo rows based on data frequency."""
+    freq = frequency or DATA_FREQUENCY
+    return EMBARGO_ROWS_DAILY if freq == "daily" else EMBARGO_ROWS_MONTHLY
+
+# Default value for backward compatibility (recomputed when frequency changes)
+EMBARGO_ROWS = EMBARGO_ROWS_DAILY if DATA_FREQUENCY == "daily" else EMBARGO_ROWS_MONTHLY
 
 # Model Parameters
 # Options: 'LinearRegression', 'RandomForest', 'XGBoost', 'MLP', 'LSTM', 'CNN'
@@ -99,7 +140,7 @@ TUNE_END_DATE = "2022-12-31"     # last date used for tuning folds
 TUNE_TRAIN_YEARS = 5             # years of training per fold
 TUNE_VAL_MONTHS = 6              # validation window length (months)
 TUNE_STEP_MONTHS = 6             # step between folds (months)
-TUNE_BUFFER_DAYS = 21            # embargo between train/val, similar to BUFFER_DAYS
+TUNE_EMBARGO_ROWS = 21           # embargo rows between train/val (trading days, same as EMBARGO_ROWS)
 TUNE_MAX_FOLDS = 10              # maximum number of folds to use (for speed)
 TUNE_EPOCHS = 15                 # reduced epochs per fold during tuning
 
@@ -141,3 +182,17 @@ PRED_CLIP = None                # If not None, clip y_pred in strategy calculati
 APPLY_MACRO_LAG = True
 MACRO_LAG_RELEASE_COLS = ["UMICH_SENT"]  # Columns to lag (ISM_PMI removed - data source unavailable)
 MACRO_LAG_DAYS = 22  # ~1 trading month delay approximation
+
+# ===============================
+# Forward-Fill Allowed Columns (Anti-Leakage)
+# ===============================
+# Only these columns are allowed to be forward-filled in data_prep.
+# These are macro/fundamental series where the last known value is carried forward
+# (i.e., "as-of" correct since we use the most recent available observation).
+# Rolling indicators (MA, RSI, vol, etc.) should NOT be filled - drop warmup rows instead.
+MACRO_FFILL_COLS = [
+    "ISM_PMI",           # ISM Manufacturing PMI (monthly, ffilled after lag)
+    "UMich_Sentiment",   # Consumer sentiment (monthly, ffilled after lag)
+    "Yield_Curve",       # T10Y2Y spread (daily, ffill for weekends/holidays)
+    "Put_Call_Ratio",    # Put/Call ratio (daily, ffill for missing days)
+]
