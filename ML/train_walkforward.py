@@ -580,6 +580,10 @@ def main():
             fold_strat = metrics.calculate_strategy_metrics(y_test_arr, y_pred_arr, pred_clip=pred_clip)
             fold_bigmove_strat = metrics.calculate_bigmove_strategy_metrics(y_test_arr, y_pred_arr, threshold=big_move_thresh, pred_clip=pred_clip)
             
+            # --- Signal Concentration Analysis (Decile Spread + Coverage) ---
+            fold_decile = metrics.calculate_decile_analysis(y_test_arr, y_pred_arr)
+            fold_coverage = metrics.calculate_coverage_performance(y_test_arr, y_pred_arr, frequency=frequency)
+            
             fold_entry = {
                 'fold_id': fold,
                 'train_start': str(train_idx.min().date()),
@@ -592,6 +596,17 @@ def main():
                 'mae': fold_mae,
                 'dir_acc': fold_dir_acc,
                 'ic': fold_ic,
+                # Decile spread metrics
+                'decile_spread': fold_decile['spread'],
+                'decile_spread_tstat': fold_decile['spread_tstat'],
+                'decile_monotonicity': fold_decile['monotonicity'],
+                'top_decile_mean': fold_decile['top_mean'],
+                'bottom_decile_mean': fold_decile['bottom_mean'],
+                # Coverage vs performance
+                'best_thresh_sharpe': fold_coverage['best_sharpe'],
+                'best_thresh': fold_coverage['best_sharpe_threshold'],
+                'best_thresh_coverage': fold_coverage['best_sharpe_coverage'],
+                # Existing metrics
                 'big_up_precision': fold_tail['precision_up_strict'],
                 'big_up_recall': fold_tail['recall_up_strict'],
                 'big_down_precision': fold_tail['precision_down_strict'],
@@ -698,6 +713,37 @@ def main():
     print(f"  Precision (Down): {tail_metrics['precision_down_strict']:.2f}")
     print(f"  Recall (Down): {tail_metrics['recall_down_strict']:.2f}")
     
+    # --- Signal Concentration Analysis (Aggregated) ---
+    signal_concentration = metrics.calculate_signal_concentration(all_actuals, all_preds, frequency=frequency)
+    metrics.print_signal_concentration_report(signal_concentration, title="Signal Concentration Analysis (Aggregated)")
+    
+    # --- Per-Fold Signal Quality Summary ---
+    if len(fold_metrics_list) > 0:
+        fold_ics = [f['ic'] for f in fold_metrics_list if 'ic' in f]
+        fold_spreads = [f['decile_spread'] for f in fold_metrics_list if 'decile_spread' in f]
+        fold_tstats = [f['decile_spread_tstat'] for f in fold_metrics_list if 'decile_spread_tstat' in f]
+        fold_monos = [f['decile_monotonicity'] for f in fold_metrics_list if 'decile_monotonicity' in f]
+        fold_best_sharpes = [f['best_thresh_sharpe'] for f in fold_metrics_list if 'best_thresh_sharpe' in f]
+        
+        print(f"\n{'='*70}")
+        print(f" Per-Fold Signal Quality Summary ({len(fold_metrics_list)} folds)")
+        print(f"{'='*70}")
+        print(f"\n  IC across folds:           {np.mean(fold_ics):.4f} ± {np.std(fold_ics):.4f}")
+        if fold_spreads:
+            print(f"  Decile Spread (avg):       {np.mean(fold_spreads):+.4f} ± {np.std(fold_spreads):.4f}")
+            print(f"  Decile T-stat (avg):       {np.mean(fold_tstats):+.2f}")
+            print(f"  Monotonicity (avg):        {np.mean(fold_monos):+.3f}")
+        if fold_best_sharpes:
+            print(f"  Best Thresh Sharpe (avg):  {np.mean(fold_best_sharpes):.2f} ± {np.std(fold_best_sharpes):.2f}")
+        
+        # Correlation: IC vs decile spread (should be positive)
+        if len(fold_ics) == len(fold_spreads) and len(fold_ics) > 3:
+            from scipy.stats import spearmanr
+            ic_spread_corr, _ = spearmanr(fold_ics, fold_spreads)
+            print(f"  IC-Spread correlation:     {ic_spread_corr:+.3f}")
+        
+        print(f"{'='*70}")
+    
     # --- Threshold Tuning Aggregated Results ---
     tuned_policy_agg = None
     if config.WF_TUNE_THRESHOLD and len(threshold_tuning_results) > 0:
@@ -726,7 +772,8 @@ def main():
         'ic': ic,
         'strat_metrics': strat_metrics,
         'tail_metrics': tail_metrics,
-        'bigmove_strat': bigmove_strat
+        'bigmove_strat': bigmove_strat,
+        'signal_concentration': signal_concentration
     }
     
     # Aggregate validation metrics from folds if available

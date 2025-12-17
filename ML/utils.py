@@ -300,6 +300,34 @@ class ExperimentLogger:
                 f.write(f"- Precision (Down): {tm['precision_down_strict']:.2f} (Predicted: {tm['count_pred_down']})\n")
                 f.write(f"- Recall (Down): {tm['recall_down_strict']:.2f} (Actual: {tm['count_actual_down']})\n")
             
+            # Signal Concentration Analysis
+            if 'signal_concentration' in metrics_test:
+                sc = metrics_test['signal_concentration']
+                f.write(f"\n#### Signal Concentration Analysis\n")
+                f.write(f"> Measures where alpha is concentrated - real signals show up in confident predictions.\n\n")
+                f.write(f"**Decile Spread (Top - Bottom):**\n")
+                f.write(f"- Spread: {sc['decile_spread']:+.4f}\n")
+                f.write(f"- T-statistic: {sc['decile_spread_tstat']:+.2f}\n")
+                f.write(f"- P-value: {sc['decile_spread_pvalue']:.4f}\n")
+                f.write(f"- Monotonicity: {sc['decile_monotonicity']:+.3f}\n")
+                f.write(f"- Top Decile Mean: {sc['top_decile_mean']:+.4f}\n")
+                f.write(f"- Bottom Decile Mean: {sc['bottom_decile_mean']:+.4f}\n\n")
+                
+                f.write(f"**Coverage vs Performance:**\n")
+                f.write(f"- Best Threshold: {sc['best_threshold']:.4f}\n")
+                f.write(f"- Coverage at Best: {sc['best_threshold_coverage']:.1%}\n")
+                f.write(f"- Sharpe at Best: {sc['best_threshold_sharpe']:.2f}\n")
+                f.write(f"- Coverage-Sharpe Corr: {sc['coverage_sharpe_corr']:+.3f}\n")
+                
+                # Quantile returns table
+                if sc.get('quantile_returns') and len(sc['quantile_returns']) > 0:
+                    f.write(f"\n**Returns by Prediction Decile:**\n")
+                    f.write(f"| Decile | Mean Return |\n")
+                    f.write(f"|--------|------------|\n")
+                    for i, ret in enumerate(sc['quantile_returns']):
+                        if not np.isnan(ret):
+                            f.write(f"| Q{i+1} | {ret:+.4f} |\n")
+            
             # Threshold Tuning Results (Anti-Policy-Overfit)
             if 'threshold_tuning' in metrics_test:
                 tt = metrics_test['threshold_tuning']

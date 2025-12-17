@@ -253,6 +253,295 @@ def calculate_decile_spread(y_true, y_pred):
     return mean_top - mean_bottom
 
 
+def calculate_decile_analysis(y_true, y_pred, n_quantiles=10):
+    """
+    Comprehensive decile (quantile) analysis of predictions vs actual returns.
+    
+    This is the key diagnostic for understanding where alpha is concentrated.
+    If the model has predictive power, top deciles should have higher returns
+    than bottom deciles.
+    
+    Args:
+        y_true: Actual returns
+        y_pred: Predicted returns
+        n_quantiles: Number of quantiles (default 10 for deciles)
+        
+    Returns:
+        Dictionary with:
+        - spread: Top decile mean - Bottom decile mean
+        - spread_tstat: t-statistic for the spread
+        - top_mean: Mean return of top decile
+        - bottom_mean: Mean return of bottom decile
+        - top_count: Number of samples in top decile
+        - bottom_count: Number of samples in bottom decile
+        - monotonicity: Spearman correlation of decile ranks vs decile returns
+        - quantile_returns: List of mean returns by quantile (lowest to highest pred)
+    """
+    from scipy.stats import ttest_ind
+    
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    
+    if len(y_pred) < n_quantiles * 2:
+        return {
+            'spread': 0.0, 'spread_tstat': 0.0, 'spread_pvalue': 1.0,
+            'top_mean': 0.0, 'bottom_mean': 0.0,
+            'top_count': 0, 'bottom_count': 0,
+            'monotonicity': 0.0, 'quantile_returns': []
+        }
+    
+    # Assign quantile labels based on predictions
+    try:
+        quantile_labels = pd.qcut(y_pred, n_quantiles, labels=False, duplicates='drop')
+    except ValueError:
+        # Not enough unique values for quantiles
+        return {
+            'spread': 0.0, 'spread_tstat': 0.0, 'spread_pvalue': 1.0,
+            'top_mean': 0.0, 'bottom_mean': 0.0,
+            'top_count': 0, 'bottom_count': 0,
+            'monotonicity': 0.0, 'quantile_returns': []
+        }
+    
+    n_actual_quantiles = len(np.unique(quantile_labels))
+    
+    # Compute mean return per quantile
+    quantile_returns = []
+    for q in range(n_actual_quantiles):
+        mask = quantile_labels == q
+        if np.sum(mask) > 0:
+            quantile_returns.append(np.mean(y_true[mask]))
+        else:
+            quantile_returns.append(np.nan)
+    
+    # Top and bottom decile
+    top_mask = quantile_labels == (n_actual_quantiles - 1)
+    bottom_mask = quantile_labels == 0
+    
+    top_returns = y_true[top_mask]
+    bottom_returns = y_true[bottom_mask]
+    
+    top_mean = np.mean(top_returns) if len(top_returns) > 0 else 0.0
+    bottom_mean = np.mean(bottom_returns) if len(bottom_returns) > 0 else 0.0
+    spread = top_mean - bottom_mean
+    
+    # T-test for spread significance
+    if len(top_returns) > 1 and len(bottom_returns) > 1:
+        tstat, pvalue = ttest_ind(top_returns, bottom_returns)
+    else:
+        tstat, pvalue = 0.0, 1.0
+    
+    # Monotonicity: correlation between quantile rank and mean return
+    # High monotonicity = returns increase smoothly with prediction rank
+    valid_returns = [r for r in quantile_returns if not np.isnan(r)]
+    if len(valid_returns) >= 3:
+        mono_corr, _ = spearmanr(range(len(valid_returns)), valid_returns)
+        monotonicity = mono_corr if not np.isnan(mono_corr) else 0.0
+    else:
+        monotonicity = 0.0
+    
+    return {
+        'spread': spread,
+        'spread_tstat': tstat,
+        'spread_pvalue': pvalue,
+        'top_mean': top_mean,
+        'bottom_mean': bottom_mean,
+        'top_count': int(np.sum(top_mask)),
+        'bottom_count': int(np.sum(bottom_mask)),
+        'monotonicity': monotonicity,
+        'quantile_returns': quantile_returns
+    }
+
+
+def calculate_coverage_performance(y_true, y_pred, thresholds=None, frequency=None):
+    """
+    Calculate coverage (% periods traded) vs performance (Sharpe) for various thresholds.
+    
+    This reveals the coverage-performance tradeoff: higher thresholds mean
+    fewer trades but potentially higher quality signals.
+    
+    Args:
+        y_true: Actual returns
+        y_pred: Predicted returns
+        thresholds: List of threshold values to evaluate (if None, auto-generated)
+        frequency: Data frequency for annualization
+        
+    Returns:
+        Dictionary with:
+        - threshold_analysis: List of {threshold, coverage, sharpe, return, ic} dicts
+        - best_sharpe_threshold: Threshold with highest Sharpe
+        - best_sharpe_coverage: Coverage at best Sharpe threshold
+        - coverage_performance_corr: Correlation between coverage and Sharpe
+    """
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    
+    # Auto-generate thresholds if not provided
+    if thresholds is None:
+        abs_pred = np.abs(y_pred)
+        # Use percentiles of |predictions| as thresholds
+        thresholds = [0.0]  # Always include 0 (full coverage)
+        for pct in [25, 50, 60, 70, 75, 80, 85, 90, 95]:
+            thresholds.append(np.percentile(abs_pred, pct))
+        thresholds = sorted(set(thresholds))
+    
+    threshold_analysis = []
+    
+    for thresh in thresholds:
+        result = evaluate_policy(
+            y_true, y_pred,
+            policy='thresholded',
+            threshold=thresh,
+            frequency=frequency
+        )
+        
+        coverage = result['holding_frequency']
+        sharpe = result['sharpe']
+        total_return = result['total_return']
+        trade_count = result['trade_count']
+        
+        # IC only for traded periods
+        traded_mask = np.abs(y_pred) > thresh
+        if np.sum(traded_mask) > 5:
+            traded_ic = calculate_ic(y_true[traded_mask], y_pred[traded_mask])
+        else:
+            traded_ic = 0.0
+        
+        threshold_analysis.append({
+            'threshold': thresh,
+            'coverage': coverage,
+            'sharpe': sharpe,
+            'total_return': total_return,
+            'trade_count': trade_count,
+            'ic_when_trading': traded_ic
+        })
+    
+    # Find best Sharpe threshold (excluding 0 coverage)
+    valid_analyses = [a for a in threshold_analysis if a['coverage'] > 0.05]
+    if valid_analyses:
+        best = max(valid_analyses, key=lambda x: x['sharpe'])
+        best_sharpe_threshold = best['threshold']
+        best_sharpe_coverage = best['coverage']
+        best_sharpe = best['sharpe']
+    else:
+        best_sharpe_threshold = 0.0
+        best_sharpe_coverage = 1.0
+        best_sharpe = 0.0
+    
+    # Coverage vs Sharpe correlation
+    if len(threshold_analysis) >= 3:
+        coverages = [a['coverage'] for a in threshold_analysis]
+        sharpes = [a['sharpe'] for a in threshold_analysis]
+        if np.std(coverages) > 0 and np.std(sharpes) > 0:
+            cov_perf_corr, _ = spearmanr(coverages, sharpes)
+        else:
+            cov_perf_corr = 0.0
+    else:
+        cov_perf_corr = 0.0
+    
+    return {
+        'threshold_analysis': threshold_analysis,
+        'best_sharpe_threshold': best_sharpe_threshold,
+        'best_sharpe_coverage': best_sharpe_coverage,
+        'best_sharpe': best_sharpe,
+        'coverage_performance_corr': cov_perf_corr if not np.isnan(cov_perf_corr) else 0.0
+    }
+
+
+def calculate_signal_concentration(y_true, y_pred, frequency=None):
+    """
+    Comprehensive signal concentration analysis combining decile spread and coverage.
+    
+    This is the key diagnostic for understanding if alpha is concentrated in
+    confident predictions - the hallmark of a real signal vs noise.
+    
+    Args:
+        y_true: Actual returns
+        y_pred: Predicted returns
+        frequency: Data frequency
+        
+    Returns:
+        Dictionary with all signal concentration metrics
+    """
+    # Decile analysis
+    decile = calculate_decile_analysis(y_true, y_pred)
+    
+    # Coverage-performance analysis
+    coverage = calculate_coverage_performance(y_true, y_pred, frequency=frequency)
+    
+    # Basic metrics
+    ic = calculate_ic(y_true, y_pred)
+    hit_rate = calculate_hit_rate(y_true, y_pred)
+    
+    return {
+        'ic': ic,
+        'hit_rate': hit_rate,
+        'decile_spread': decile['spread'],
+        'decile_spread_tstat': decile['spread_tstat'],
+        'decile_spread_pvalue': decile['spread_pvalue'],
+        'decile_monotonicity': decile['monotonicity'],
+        'top_decile_mean': decile['top_mean'],
+        'bottom_decile_mean': decile['bottom_mean'],
+        'quantile_returns': decile['quantile_returns'],
+        'best_threshold': coverage['best_sharpe_threshold'],
+        'best_threshold_coverage': coverage['best_sharpe_coverage'],
+        'best_threshold_sharpe': coverage['best_sharpe'],
+        'coverage_sharpe_corr': coverage['coverage_performance_corr'],
+        'coverage_analysis': coverage['threshold_analysis']
+    }
+
+
+def print_signal_concentration_report(results, title="Signal Concentration Analysis"):
+    """
+    Print a formatted signal concentration report.
+    
+    Args:
+        results: Dictionary from calculate_signal_concentration
+        title: Report title
+    """
+    print(f"\n{'='*70}")
+    print(f" {title}")
+    print(f"{'='*70}")
+    
+    # Basic metrics
+    print(f"\n  Prediction Quality:")
+    print(f"    IC (Spearman):   {results['ic']:+.4f}")
+    print(f"    Hit Rate:        {results['hit_rate']:.1%}")
+    
+    # Decile spread
+    print(f"\n  Decile Spread (Top - Bottom):")
+    print(f"    Spread:          {results['decile_spread']:+.4f}")
+    print(f"    T-statistic:     {results['decile_spread_tstat']:+.2f}")
+    print(f"    P-value:         {results['decile_spread_pvalue']:.4f}")
+    print(f"    Monotonicity:    {results['decile_monotonicity']:+.3f}")
+    print(f"    Top Decile Mean: {results['top_decile_mean']:+.4f}")
+    print(f"    Bottom Decile:   {results['bottom_decile_mean']:+.4f}")
+    
+    # Quantile returns
+    if results['quantile_returns']:
+        q_rets = results['quantile_returns']
+        print(f"\n  Returns by Prediction Quantile (low → high):")
+        for i, r in enumerate(q_rets):
+            bar = "█" * int(abs(r) * 100) if not np.isnan(r) else ""
+            sign = "+" if r >= 0 else ""
+            print(f"    Q{i+1}: {sign}{r:.4f} {bar}")
+    
+    # Coverage analysis
+    print(f"\n  Coverage vs Performance (Threshold Policies):")
+    print(f"    Best Sharpe:       {results['best_threshold_sharpe']:.2f}")
+    print(f"    @ Threshold:       {results['best_threshold']:.4f}")
+    print(f"    @ Coverage:        {results['best_threshold_coverage']:.1%}")
+    print(f"    Cov-Sharpe Corr:   {results['coverage_sharpe_corr']:+.3f}")
+    
+    # Coverage breakdown
+    if results.get('coverage_analysis'):
+        print(f"\n  Threshold | Coverage | Sharpe | IC(traded)")
+        print(f"  {'-'*45}")
+        for a in results['coverage_analysis']:
+            print(f"    {a['threshold']:6.4f} |  {a['coverage']:5.1%}  | {a['sharpe']:+5.2f} |   {a['ic_when_trading']:+.3f}")
+    
+    print(f"{'='*70}\n")
+
+
 # ============================================================================
 # Strategy Evaluation Functions
 # ============================================================================
