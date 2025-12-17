@@ -81,6 +81,12 @@ FEATURE_STANDARDIZE_PER_FOLD = True
 EVAL_THRESHOLDED_POLICY = True
 EVAL_CONTINUOUS_SIZING_POLICY = True
 
+# Execution Frequency
+# EXECUTION_FREQUENCY: "daily" executes trades daily, "monthly" aggregates to monthly signals
+# When "monthly": aggregates last 5 trading days of predictions, executes one trade per month,
+# holds for one month, then rebalances. Metrics computed on monthly returns.
+EXECUTION_FREQUENCY = "monthly"  # Options: "daily", "monthly"
+
 # Random Forest Params
 RF_N_ESTIMATORS = 100
 RF_MAX_DEPTH = 10

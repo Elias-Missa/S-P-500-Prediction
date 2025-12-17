@@ -553,6 +553,9 @@ class ExperimentLogger:
                 'tail_threshold': config_dict.get('TAIL_THRESHOLD'),
                 'pred_clip': config_dict.get('PRED_CLIP'),
             },
+            'execution_config': {
+                'execution_frequency': config_dict.get('EXECUTION_FREQUENCY'),
+            },
             'hyperparameters': {}
         }
         

@@ -213,6 +213,7 @@ def main():
     all_train_actuals = []
     all_val_preds = []
     all_val_actuals = []
+    all_test_dates = []  # Collect dates for monthly execution mode
     
     for fold, train_idx, val_idx, test_idx in splits:
         print(f"\n=== Fold {fold+1}/{total_folds} ===")
@@ -591,6 +592,30 @@ def main():
         all_preds.extend(y_pred)
         all_actuals.extend(y_test)
         
+        # Store test dates for monthly execution mode
+        # Get dates from df index using test_idx
+        try:
+            # test_idx should be integer positions, use them to index df
+            if hasattr(test_idx, '__iter__') and not isinstance(test_idx, str):
+                # Convert to list if it's a range or other iterable
+                import pandas as pd
+                if isinstance(test_idx, (list, np.ndarray)) or (hasattr(pd, 'Index') and isinstance(test_idx, pd.Index)):
+                    test_dates = df.index[test_idx]
+                    all_test_dates.extend(test_dates.tolist())
+                else:
+                    # Try to convert to list
+                    test_dates = df.index[list(test_idx)]
+                    all_test_dates.extend(test_dates.tolist())
+            elif hasattr(y_test, 'index'):
+                all_test_dates.extend(y_test.index.tolist())
+        except (IndexError, TypeError) as e:
+            # Fallback: use y_test index if available
+            if hasattr(y_test, 'index'):
+                all_test_dates.extend(y_test.index.tolist())
+            else:
+                # If all else fails, skip date collection for this fold
+                pass
+        
         # Store validation predictions if available
         if y_val_pred is not None and y_val_actual is not None:
             all_val_preds.extend(y_val_pred)
@@ -608,13 +633,41 @@ def main():
             
             big_move_thresh = getattr(config, 'TAIL_THRESHOLD', getattr(config, 'BIG_MOVE_THRESHOLD', 0.03))
             pred_clip = getattr(config, 'PRED_CLIP', None)
+            execution_frequency = getattr(config, 'EXECUTION_FREQUENCY', 'daily')
+            
+            # Get fold dates for monthly execution mode
+            fold_test_dates = None
+            if execution_frequency == "monthly":
+                try:
+                    # Try to get dates from y_test index first (most reliable)
+                    if hasattr(y_test, 'index') and len(y_test.index) == len(y_test_arr):
+                        fold_test_dates = pd.DatetimeIndex(y_test.index)
+                    # Otherwise try to get from df using test_idx
+                    elif hasattr(test_idx, '__len__'):
+                        # Convert test_idx to list if needed
+                        idx_list = list(test_idx) if not isinstance(test_idx, (list, np.ndarray)) else test_idx
+                        fold_test_dates = pd.DatetimeIndex(df.index[idx_list])
+                except Exception as e:
+                    # If date collection fails, monthly mode won't work for this fold
+                    print(f"  Warning: Could not collect dates for fold {fold}: {e}")
+                    fold_test_dates = None
+            
             fold_tail = metrics.calculate_tail_metrics(y_test_arr, y_pred_arr, threshold=big_move_thresh)
-            fold_strat = metrics.calculate_strategy_metrics(y_test_arr, y_pred_arr, pred_clip=pred_clip)
-            fold_bigmove_strat = metrics.calculate_bigmove_strategy_metrics(y_test_arr, y_pred_arr, threshold=big_move_thresh, pred_clip=pred_clip)
+            fold_strat = metrics.calculate_strategy_metrics(
+                y_test_arr, y_pred_arr, pred_clip=pred_clip,
+                dates=fold_test_dates, execution_frequency=execution_frequency
+            )
+            fold_bigmove_strat = metrics.calculate_bigmove_strategy_metrics(
+                y_test_arr, y_pred_arr, threshold=big_move_thresh, pred_clip=pred_clip,
+                dates=fold_test_dates, execution_frequency=execution_frequency
+            )
             
             # --- Signal Concentration Analysis (Decile Spread + Coverage) ---
             fold_decile = metrics.calculate_decile_analysis(y_test_arr, y_pred_arr)
-            fold_coverage = metrics.calculate_coverage_performance(y_test_arr, y_pred_arr, frequency=frequency)
+            fold_coverage = metrics.calculate_coverage_performance(
+                y_test_arr, y_pred_arr, frequency=frequency,
+                dates=fold_test_dates, execution_frequency=execution_frequency
+            )
             
             fold_entry = {
                 'fold_id': fold,
@@ -669,6 +722,21 @@ def main():
                 
                 # --- Per-Fold Threshold Tuning (Anti-Policy-Overfit) ---
                 if config.WF_TUNE_THRESHOLD:
+                    # Get val dates for monthly execution mode
+                    val_dates = None
+                    if execution_frequency == "monthly":
+                        try:
+                            # Try to get dates from y_val_orig index first (most reliable)
+                            if hasattr(y_val_orig, 'index') and len(y_val_orig.index) == len(y_val_actual):
+                                val_dates = pd.DatetimeIndex(y_val_orig.index)
+                            # Otherwise try to get from df using val_idx
+                            elif hasattr(val_idx, '__len__') and len(val_idx) > 0:
+                                idx_list = list(val_idx) if not isinstance(val_idx, (list, np.ndarray)) else val_idx
+                                val_dates = pd.DatetimeIndex(df.index[idx_list])
+                        except Exception as e:
+                            print(f"  Warning: Could not collect val dates for fold {fold}: {e}")
+                            val_dates = None
+                    
                     tuned_result = metrics.tune_and_evaluate_fold(
                         y_val_true=y_val_actual,
                         y_val_pred=y_val_pred,
@@ -678,7 +746,10 @@ def main():
                         n_grid_points=config.WF_THRESHOLD_N_GRID,
                         min_trade_fraction=config.WF_THRESHOLD_MIN_TRADE_FRAC,
                         frequency=frequency,
-                        apply_vol_targeting=config.WF_THRESHOLD_VOL_TARGETING
+                        apply_vol_targeting=config.WF_THRESHOLD_VOL_TARGETING,
+                        val_dates=val_dates,
+                        test_dates=fold_test_dates,
+                        execution_frequency=execution_frequency
                     )
                     
                     # Log the tuned threshold for this fold
@@ -714,10 +785,27 @@ def main():
     # Advanced Metrics
     big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
     pred_clip = getattr(config, 'PRED_CLIP', None)
+    execution_frequency = getattr(config, 'EXECUTION_FREQUENCY', 'daily')
     ic = metrics.calculate_ic(all_actuals, all_preds)
-    strat_metrics = metrics.calculate_strategy_metrics(all_actuals, all_preds, pred_clip=pred_clip)
+    
+    # Prepare dates for monthly execution mode
+    test_dates = None
+    if execution_frequency == "monthly" and len(all_test_dates) > 0:
+        import pandas as pd
+        if isinstance(all_test_dates[0], pd.Timestamp):
+            test_dates = pd.DatetimeIndex(all_test_dates)
+        else:
+            test_dates = pd.to_datetime(all_test_dates)
+    
+    strat_metrics = metrics.calculate_strategy_metrics(
+        all_actuals, all_preds, pred_clip=pred_clip, 
+        dates=test_dates, execution_frequency=execution_frequency
+    )
     tail_metrics = metrics.calculate_tail_metrics(all_actuals, all_preds, threshold=big_move_thresh)
-    bigmove_strat = metrics.calculate_bigmove_strategy_metrics(all_actuals, all_preds, threshold=big_move_thresh, pred_clip=pred_clip)
+    bigmove_strat = metrics.calculate_bigmove_strategy_metrics(
+        all_actuals, all_preds, threshold=big_move_thresh, pred_clip=pred_clip,
+        dates=test_dates, execution_frequency=execution_frequency
+    )
     
     print(f"\n--- Walk-Forward Results (Aggregated) ---")
     print(f"Total Samples: {len(all_actuals)}")
@@ -746,7 +834,10 @@ def main():
     print(f"  Recall (Down): {tail_metrics['recall_down_strict']:.2f}")
     
     # --- Signal Concentration Analysis (Aggregated) ---
-    signal_concentration = metrics.calculate_signal_concentration(all_actuals, all_preds, frequency=frequency)
+    signal_concentration = metrics.calculate_signal_concentration(
+        all_actuals, all_preds, frequency=frequency,
+        dates=test_dates, execution_frequency=execution_frequency
+    )
     metrics.print_signal_concentration_report(signal_concentration, title="Signal Concentration Analysis (Aggregated)")
     
     # --- Per-Fold Signal Quality Summary ---

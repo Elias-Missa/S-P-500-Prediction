@@ -352,7 +352,8 @@ def calculate_decile_analysis(y_true, y_pred, n_quantiles=10):
     }
 
 
-def calculate_coverage_performance(y_true, y_pred, thresholds=None, frequency=None):
+def calculate_coverage_performance(y_true, y_pred, thresholds=None, frequency=None, 
+                                   dates=None, execution_frequency=None):
     """
     Calculate coverage (% periods traded) vs performance (Sharpe) for various thresholds.
     
@@ -364,6 +365,8 @@ def calculate_coverage_performance(y_true, y_pred, thresholds=None, frequency=No
         y_pred: Predicted returns
         thresholds: List of threshold values to evaluate (if None, auto-generated)
         frequency: Data frequency for annualization
+        dates: Optional dates for monthly execution mode
+        execution_frequency: Execution frequency mode
         
     Returns:
         Dictionary with:
@@ -391,7 +394,9 @@ def calculate_coverage_performance(y_true, y_pred, thresholds=None, frequency=No
             y_true, y_pred,
             policy='thresholded',
             threshold=thresh,
-            frequency=frequency
+            frequency=frequency,
+            dates=dates,
+            execution_frequency=execution_frequency
         )
         
         coverage = result['holding_frequency']
@@ -447,7 +452,7 @@ def calculate_coverage_performance(y_true, y_pred, thresholds=None, frequency=No
     }
 
 
-def calculate_signal_concentration(y_true, y_pred, frequency=None):
+def calculate_signal_concentration(y_true, y_pred, frequency=None, dates=None, execution_frequency=None):
     """
     Comprehensive signal concentration analysis combining decile spread and coverage.
     
@@ -458,6 +463,8 @@ def calculate_signal_concentration(y_true, y_pred, frequency=None):
         y_true: Actual returns
         y_pred: Predicted returns
         frequency: Data frequency
+        dates: Optional dates for monthly execution mode
+        execution_frequency: Execution frequency mode
         
     Returns:
         Dictionary with all signal concentration metrics
@@ -466,7 +473,10 @@ def calculate_signal_concentration(y_true, y_pred, frequency=None):
     decile = calculate_decile_analysis(y_true, y_pred)
     
     # Coverage-performance analysis
-    coverage = calculate_coverage_performance(y_true, y_pred, frequency=frequency)
+    coverage = calculate_coverage_performance(
+        y_true, y_pred, frequency=frequency,
+        dates=dates, execution_frequency=execution_frequency
+    )
     
     # Basic metrics
     ic = calculate_ic(y_true, y_pred)
@@ -609,12 +619,125 @@ def compute_max_drawdown(equity_curve):
     return np.min(drawdown)
 
 
+def aggregate_daily_to_monthly_signals(y_pred, dates, lookback_days=5):
+    """
+    Aggregate daily predictions into monthly signals using last N trading days average.
+    
+    Args:
+        y_pred: Array of daily predictions
+        dates: Array or Index of dates (DatetimeIndex or similar)
+        lookback_days: Number of last trading days to average (default 5)
+        
+    Returns:
+        monthly_signals: Array of monthly signals (one per month)
+        monthly_dates: Array of month-end dates
+    """
+    import pandas as pd
+    
+    # Convert to DataFrame for easier manipulation
+    if not isinstance(dates, pd.DatetimeIndex):
+        dates = pd.to_datetime(dates)
+    
+    df = pd.DataFrame({'pred': y_pred}, index=dates)
+    
+    # Group by year-month
+    df['year_month'] = df.index.to_period('M')
+    
+    # For each month, take the average of the last lookback_days trading days
+    monthly_signals = []
+    monthly_dates = []
+    
+    for year_month, group in df.groupby('year_month'):
+        # Get last lookback_days days of the month
+        last_days = group.tail(lookback_days)
+        if len(last_days) > 0:
+            monthly_signal = last_days['pred'].mean()
+            monthly_signals.append(monthly_signal)
+            # Use the last trading day of the month as the signal date
+            monthly_dates.append(last_days.index[-1])
+    
+    return np.array(monthly_signals), pd.DatetimeIndex(monthly_dates)
+
+
+def create_monthly_positions(monthly_signals, monthly_dates, policy='long_short', 
+                            threshold=0.03, scale_factor=1.0):
+    """
+    Create monthly positions from monthly signals. One trade per month, held for one month.
+    No overlapping positions.
+    
+    Args:
+        monthly_signals: Array of monthly signals
+        monthly_dates: DatetimeIndex of month-end dates
+        policy: Trading policy
+        threshold: Threshold for thresholded policy
+        scale_factor: Scale factor for continuous_sizing
+        
+    Returns:
+        monthly_positions: Array of positions (one per month)
+    """
+    # Compute positions from signals
+    positions = position_from_pred(
+        monthly_signals, 
+        policy=policy, 
+        threshold=threshold, 
+        scale_factor=scale_factor
+    )
+    
+    return positions
+
+
+def compute_monthly_returns_from_forward_returns(forward_returns, dates, monthly_dates):
+    """
+    Compute monthly returns from forward returns for monthly positions.
+    
+    The signal is generated at month-end (last 5 trading days average), and the position
+    is entered at the start of the next month. Since forward_returns are already 21-day
+    forward returns, we use the forward return starting from the entry date.
+    
+    Args:
+        forward_returns: Array of 21-day forward returns (one per day)
+        dates: DatetimeIndex of daily dates
+        monthly_dates: DatetimeIndex of month-end dates (signal generation dates)
+        
+    Returns:
+        monthly_returns: Array of monthly returns (one per month, for the holding period)
+    """
+    import pandas as pd
+    
+    if not isinstance(dates, pd.DatetimeIndex):
+        dates = pd.to_datetime(dates)
+    if not isinstance(monthly_dates, pd.DatetimeIndex):
+        monthly_dates = pd.to_datetime(monthly_dates)
+    
+    # Convert forward returns to DataFrame
+    df = pd.DataFrame({'return': forward_returns}, index=dates)
+    
+    monthly_returns = []
+    
+    for signal_date in monthly_dates:
+        # Find the next trading day after signal_date (entry date)
+        next_trading_days = df.index[df.index > signal_date]
+        if len(next_trading_days) > 0:
+            entry_date = next_trading_days[0]
+            # Use the forward return starting from entry date
+            if entry_date in df.index:
+                monthly_return = df.loc[entry_date, 'return']
+                monthly_returns.append(monthly_return)
+            else:
+                monthly_returns.append(0.0)
+        else:
+            monthly_returns.append(0.0)
+    
+    return np.array(monthly_returns)
+
+
 def evaluate_policy(y_true, y_pred, policy='long_short', threshold=0.03,
                     returns_for_vol=None, apply_vol_targeting=False,
                     target_vol=DEFAULT_TARGET_VOL, vol_lookback=DEFAULT_VOL_LOOKBACK,
                     max_leverage=DEFAULT_MAX_LEVERAGE, min_leverage=DEFAULT_MIN_LEVERAGE,
                     transaction_cost=0.0, apply_tc=False,
-                    frequency=None, scale_factor=None):
+                    frequency=None, scale_factor=None, dates=None, 
+                    execution_frequency=None):
     """
     Evaluate a trading policy on predictions vs actuals.
     
@@ -633,29 +756,80 @@ def evaluate_policy(y_true, y_pred, policy='long_short', threshold=0.03,
         apply_tc: Whether to apply transaction costs
         frequency: "daily" or "monthly" for annualization
         scale_factor: Scale factor for continuous_sizing policy
+        dates: Optional DatetimeIndex or array of dates (required for monthly execution)
+        execution_frequency: "daily" or "monthly" execution mode
         
     Returns:
         Dictionary with comprehensive strategy metrics
     """
+    import pandas as pd
+    from . import config
+    
     y_true = np.array(y_true)
     y_pred = np.array(y_pred)
+    
+    # Check execution frequency (default to config or "daily")
+    if execution_frequency is None:
+        execution_frequency = getattr(config, 'EXECUTION_FREQUENCY', 'daily')
+    
+    # Handle monthly execution mode
+    if execution_frequency == "monthly":
+        if dates is None:
+            raise ValueError("dates parameter required for monthly execution frequency")
+        
+        # Aggregate daily predictions to monthly signals (last 5 trading days average)
+        monthly_signals, monthly_dates = aggregate_daily_to_monthly_signals(
+            y_pred, dates, lookback_days=5
+        )
+        
+        # Create monthly positions (one per month, no overlapping)
+        if scale_factor is None and policy == 'continuous_sizing':
+            scale_factor = np.std(monthly_signals) * 3
+        
+        monthly_positions = create_monthly_positions(
+            monthly_signals, monthly_dates, policy=policy, 
+            threshold=threshold, scale_factor=scale_factor or 1.0
+        )
+        
+        # Compute monthly returns from forward returns
+        # y_true contains 21-day forward returns, which match the monthly holding period
+        monthly_returns = compute_monthly_returns_from_forward_returns(
+            y_true, dates, monthly_dates
+        )
+        
+        # Use monthly data for evaluation
+        y_true_eval = monthly_returns
+        y_pred_eval = monthly_signals
+        positions = monthly_positions
+        frequency = "monthly"  # Override frequency for annualization
+        
+        # Note: Volatility targeting on monthly positions would need monthly vol,
+        # which is less common, so we skip it in monthly mode for now
+        if apply_vol_targeting:
+            print("Warning: Volatility targeting not implemented for monthly execution mode")
+            apply_vol_targeting = False
+    else:
+        # Daily execution mode (original behavior)
+        y_true_eval = y_true
+        y_pred_eval = y_pred
     
     # Get annualization factor
     ann_factor = get_annualization_factor(frequency)
     
-    # 1. Compute raw positions from predictions
-    if scale_factor is None and policy == 'continuous_sizing':
-        scale_factor = np.std(y_pred) * 3  # Scale so 3-sigma pred = full position
+    # 1. Compute raw positions from predictions (if not already computed in monthly mode)
+    if execution_frequency != "monthly":
+        if scale_factor is None and policy == 'continuous_sizing':
+            scale_factor = np.std(y_pred) * 3  # Scale so 3-sigma pred = full position
+        
+        positions = position_from_pred(y_pred, policy=policy, threshold=threshold, 
+                                       scale_factor=scale_factor or 1.0)
     
-    positions = position_from_pred(y_pred, policy=policy, threshold=threshold, 
-                                   scale_factor=scale_factor or 1.0)
-    
-    # 2. Apply volatility targeting if requested
+    # 2. Apply volatility targeting if requested (daily mode only)
     vol_scalar = None
-    if apply_vol_targeting:
+    if apply_vol_targeting and execution_frequency != "monthly":
         if returns_for_vol is None:
             # Use actual returns if no separate vol series provided
-            returns_for_vol = y_true
+            returns_for_vol = y_true_eval
         positions, vol_scalar = apply_volatility_targeting(
             positions, returns_for_vol,
             target_vol=target_vol, vol_lookback=vol_lookback,
@@ -665,7 +839,7 @@ def evaluate_policy(y_true, y_pred, policy='long_short', threshold=0.03,
     
     # 3. Compute strategy returns
     strategy_returns = compute_strategy_returns(
-        positions, y_true,
+        positions, y_true_eval,
         transaction_cost=transaction_cost, apply_tc=apply_tc
     )
     
@@ -695,14 +869,14 @@ def evaluate_policy(y_true, y_pred, policy='long_short', threshold=0.03,
     # Max drawdown
     max_dd = compute_max_drawdown(equity_curve)
     
-    # Hit rate (directional accuracy)
-    hit_rate = calculate_hit_rate(y_true, y_pred)
+    # Hit rate (directional accuracy) - use evaluation data
+    hit_rate = calculate_hit_rate(y_true_eval, y_pred_eval)
     
-    # Information coefficient
-    ic = calculate_ic(y_true, y_pred)
+    # Information coefficient - use evaluation data
+    ic = calculate_ic(y_true_eval, y_pred_eval)
     
-    # Decile spread
-    decile_spread = calculate_decile_spread(y_true, y_pred)
+    # Decile spread - use evaluation data
+    decile_spread = calculate_decile_spread(y_true_eval, y_pred_eval)
     
     # Trade statistics
     active_mask = positions != 0
@@ -862,7 +1036,9 @@ def tune_threshold(y_val_true, y_val_pred,
                    min_trade_fraction=0.1,
                    frequency=None,
                    returns_for_vol=None,
-                   apply_vol_targeting=False):
+                   apply_vol_targeting=False,
+                   dates=None,
+                   execution_frequency=None):
     """
     Tune the threshold τ for the thresholded policy using validation data.
     
@@ -913,7 +1089,9 @@ def tune_threshold(y_val_true, y_val_pred,
             threshold=tau,
             returns_for_vol=returns_for_vol,
             apply_vol_targeting=apply_vol_targeting,
-            frequency=frequency
+            frequency=frequency,
+            dates=dates,
+            execution_frequency=execution_frequency
         )
         
         # Skip if too few trades (policy overfit to no-trade)
@@ -967,7 +1145,10 @@ def tune_and_evaluate_fold(y_val_true, y_val_pred, y_test_true, y_test_pred,
                            frequency=None,
                            returns_for_vol_val=None,
                            returns_for_vol_test=None,
-                           apply_vol_targeting=False):
+                           apply_vol_targeting=False,
+                           val_dates=None,
+                           test_dates=None,
+                           execution_frequency=None):
     """
     Tune threshold on validation set and evaluate on test set.
     
@@ -1005,7 +1186,9 @@ def tune_and_evaluate_fold(y_val_true, y_val_pred, y_test_true, y_test_pred,
         min_trade_fraction=min_trade_fraction,
         frequency=frequency,
         returns_for_vol=returns_for_vol_val,
-        apply_vol_targeting=apply_vol_targeting
+        apply_vol_targeting=apply_vol_targeting,
+        dates=val_dates,
+        execution_frequency=execution_frequency
     )
     
     best_tau = tuning_result['best_threshold']
@@ -1017,7 +1200,9 @@ def tune_and_evaluate_fold(y_val_true, y_val_pred, y_test_true, y_test_pred,
         threshold=best_tau,
         returns_for_vol=returns_for_vol_val,
         apply_vol_targeting=apply_vol_targeting,
-        frequency=frequency
+        frequency=frequency,
+        dates=val_dates,
+        execution_frequency=execution_frequency
     )
     
     # Step 3: Evaluate test at best threshold (the real evaluation)
@@ -1027,7 +1212,9 @@ def tune_and_evaluate_fold(y_val_true, y_val_pred, y_test_true, y_test_pred,
         threshold=best_tau,
         returns_for_vol=returns_for_vol_test,
         apply_vol_targeting=apply_vol_targeting,
-        frequency=frequency
+        frequency=frequency,
+        dates=test_dates,
+        execution_frequency=execution_frequency
     )
     
     return {
@@ -1128,7 +1315,8 @@ def print_threshold_tuning_summary(agg_results, title="Threshold-Tuned Policy Re
 # Legacy Compatibility Functions
 # ============================================================================
 
-def calculate_strategy_metrics(y_true, y_pred, pred_clip=None, frequency=None):
+def calculate_strategy_metrics(y_true, y_pred, pred_clip=None, frequency=None, 
+                               dates=None, execution_frequency=None):
     """
     [LEGACY] Simulates a simple Long/Short strategy based on prediction sign.
     
@@ -1141,11 +1329,12 @@ def calculate_strategy_metrics(y_true, y_pred, pred_clip=None, frequency=None):
     
     return evaluate_policy(
         y_true, y_pred_strat, policy='long_short',
-        frequency=frequency
+        frequency=frequency, dates=dates, execution_frequency=execution_frequency
     )
 
 
-def calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=0.03, pred_clip=None, frequency=None):
+def calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=0.03, pred_clip=None, 
+                                      frequency=None, dates=None, execution_frequency=None):
     """
     [LEGACY] Simulates a strategy that only trades when a big move is predicted.
     
@@ -1158,7 +1347,7 @@ def calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=0.03, pred_clip
     
     return evaluate_policy(
         y_true, y_pred_strat, policy='thresholded', threshold=threshold,
-        frequency=frequency
+        frequency=frequency, dates=dates, execution_frequency=execution_frequency
     )
 
 
