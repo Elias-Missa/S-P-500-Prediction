@@ -300,6 +300,28 @@ class ExperimentLogger:
                 f.write(f"- Precision (Down): {tm['precision_down_strict']:.2f} (Predicted: {tm['count_pred_down']})\n")
                 f.write(f"- Recall (Down): {tm['recall_down_strict']:.2f} (Actual: {tm['count_actual_down']})\n")
             
+            # Threshold Tuning Results (Anti-Policy-Overfit)
+            if 'threshold_tuning' in metrics_test:
+                tt = metrics_test['threshold_tuning']
+                if tt.get('enabled', False):
+                    f.write(f"\n#### Threshold-Tuned Policy (Anti-Policy-Overfit)\n")
+                    f.write(f"> Per-fold threshold tuning prevents overfitting to a single fixed threshold.\n")
+                    f.write(f"> The threshold τ is selected on validation data only, then applied to test.\n\n")
+                    f.write(f"- **Criterion**: {tt['criterion']}\n")
+                    f.write(f"- **Threshold Mean**: {tt['threshold_mean']:.4f}\n")
+                    f.write(f"- **Threshold Std**: {tt['threshold_std']:.4f}\n")
+                    f.write(f"- **Threshold Range**: [{tt['threshold_range'][0]:.4f}, {tt['threshold_range'][1]:.4f}]\n")
+                    f.write(f"- **Val Sharpe (avg)**: {tt['val_sharpe_mean']:.2f}\n")
+                    f.write(f"- **Test Sharpe (avg)**: {tt['test_sharpe_mean']:.2f} ± {tt['test_sharpe_std']:.2f}\n")
+                    f.write(f"- **Test Hit Rate (avg)**: {tt['test_hit_rate_mean']:.1%}\n")
+                    f.write(f"- **Test IC (avg)**: {tt['test_ic_mean']:.3f}\n")
+                    f.write(f"- **Total Trades**: {tt['test_trade_count_total']}\n")
+                    
+                    # Per-fold thresholds
+                    if 'thresholds_per_fold' in tt and tt['thresholds_per_fold']:
+                        thresholds_str = ', '.join([f"{t:.4f}" for t in tt['thresholds_per_fold']])
+                        f.write(f"- **Per-Fold τ**: [{thresholds_str}]\n")
+            
             # Prediction Diagnostics section
             if y_true is not None and y_pred is not None:
                 y_true_arr = np.array(y_true)

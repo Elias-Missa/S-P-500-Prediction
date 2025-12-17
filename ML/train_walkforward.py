@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
 
+
 def main():
     # Initialize Logger with loss mode tag
     loss_tag = config.LOSS_MODE.upper()
@@ -103,8 +104,11 @@ def main():
     all_preds = []
     all_actuals = []
     fold_metrics_list = []  # Store per-fold metrics
+    threshold_tuning_results = []  # Store per-fold threshold tuning results
     
     print(f"Model: {config.MODEL_TYPE}")
+    if config.WF_TUNE_THRESHOLD:
+        print(f"Threshold Tuning: ENABLED (criterion={config.WF_THRESHOLD_CRITERION}, grid_points={config.WF_THRESHOLD_N_GRID})")
     print(f"Rolling Train Window: {config.TRAIN_WINDOW_YEARS} years")
     
     # --- Optuna Hyperparameter Tuning (if enabled and not using pre-tuned params) ---
@@ -615,6 +619,37 @@ def main():
                     'val_big_down_precision': val_tail['precision_down_strict'],
                     'val_big_down_recall': val_tail['recall_down_strict']
                 })
+                
+                # --- Per-Fold Threshold Tuning (Anti-Policy-Overfit) ---
+                if config.WF_TUNE_THRESHOLD:
+                    tuned_result = metrics.tune_and_evaluate_fold(
+                        y_val_true=y_val_actual,
+                        y_val_pred=y_val_pred,
+                        y_test_true=y_test_arr,
+                        y_test_pred=y_pred_arr,
+                        criterion=config.WF_THRESHOLD_CRITERION,
+                        n_grid_points=config.WF_THRESHOLD_N_GRID,
+                        min_trade_fraction=config.WF_THRESHOLD_MIN_TRADE_FRAC,
+                        frequency=frequency,
+                        apply_vol_targeting=config.WF_THRESHOLD_VOL_TARGETING
+                    )
+                    
+                    # Log the tuned threshold for this fold
+                    tuned_tau = tuned_result['tuned_threshold']
+                    tuned_test_sharpe = tuned_result['test_metrics']['sharpe']
+                    print(f"  [Threshold Tuning] τ={tuned_tau:.4f} → Test Sharpe={tuned_test_sharpe:.2f}")
+                    
+                    # Add to fold entry
+                    fold_entry.update({
+                        'tuned_threshold': tuned_tau,
+                        'tuned_val_sharpe': tuned_result['val_metrics']['sharpe'],
+                        'tuned_test_sharpe': tuned_test_sharpe,
+                        'tuned_test_return': tuned_result['test_metrics']['total_return'],
+                        'tuned_test_hit_rate': tuned_result['test_metrics']['hit_rate'],
+                        'tuned_test_trades': tuned_result['test_metrics']['trade_count']
+                    })
+                    
+                    threshold_tuning_results.append(tuned_result)
             
             fold_metrics_list.append(fold_entry)
         
@@ -662,6 +697,15 @@ def main():
     print(f"  Recall (Up): {tail_metrics['recall_up_strict']:.2f}")
     print(f"  Precision (Down): {tail_metrics['precision_down_strict']:.2f}")
     print(f"  Recall (Down): {tail_metrics['recall_down_strict']:.2f}")
+    
+    # --- Threshold Tuning Aggregated Results ---
+    tuned_policy_agg = None
+    if config.WF_TUNE_THRESHOLD and len(threshold_tuning_results) > 0:
+        tuned_policy_agg = metrics.aggregate_tuned_policy_results(threshold_tuning_results)
+        metrics.print_threshold_tuning_summary(
+            tuned_policy_agg, 
+            title=f"Threshold-Tuned Thresholded Policy (criterion={config.WF_THRESHOLD_CRITERION})"
+        )
     
     # 4. Plot
     fig = plt.figure(figsize=(12, 6))
@@ -712,6 +756,25 @@ def main():
     
     # Save fold-level metrics to CSV
     logger.save_fold_metrics_csv(fold_metrics_list)
+    
+    # Add threshold tuning info to metrics if available
+    if tuned_policy_agg is not None:
+        metrics_test['threshold_tuning'] = {
+            'enabled': True,
+            'criterion': config.WF_THRESHOLD_CRITERION,
+            'threshold_mean': tuned_policy_agg['threshold_mean'],
+            'threshold_std': tuned_policy_agg['threshold_std'],
+            'threshold_range': [tuned_policy_agg['threshold_min'], tuned_policy_agg['threshold_max']],
+            'thresholds_per_fold': tuned_policy_agg['thresholds_per_fold'],
+            'val_sharpe_mean': tuned_policy_agg['val_sharpe_mean'],
+            'test_sharpe_mean': tuned_policy_agg['test_sharpe_mean'],
+            'test_sharpe_std': tuned_policy_agg['test_sharpe_std'],
+            'test_hit_rate_mean': tuned_policy_agg['test_hit_rate_mean'],
+            'test_ic_mean': tuned_policy_agg['test_ic_mean'],
+            'test_trade_count_total': tuned_policy_agg['test_trade_count_total']
+        }
+    else:
+        metrics_test['threshold_tuning'] = {'enabled': False}
     
     # Log summary with diagnostics
     logger.log_summary(

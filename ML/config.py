@@ -156,6 +156,18 @@ WF_EARLY_STOPPING = True         # Enable safety net
 WF_PATIENCE = 15                 # Stop if val loss doesn't improve for 15 epochs
 
 # ===============================
+# Threshold Tuning (Anti-Policy-Overfit)
+# ===============================
+# These settings control per-fold threshold tuning for the thresholded trading policy.
+# The threshold τ is tuned on validation data per fold to avoid "policy overfit"
+# where a fixed threshold might appear optimal only due to luck in one regime.
+WF_TUNE_THRESHOLD = True          # Enable per-fold threshold tuning
+WF_THRESHOLD_CRITERION = "sharpe" # Metric to optimize: "sharpe", "ic_spread", "total_return", "hit_rate"
+WF_THRESHOLD_N_GRID = 10          # Number of percentile-based threshold values to try
+WF_THRESHOLD_MIN_TRADE_FRAC = 0.1 # Minimum fraction of periods that must have trades (10%)
+WF_THRESHOLD_VOL_TARGETING = False # Apply volatility targeting during threshold tuning
+
+# ===============================
 # Target Scaling (Deep Models)
 # ===============================
 TARGET_SCALING_MODE = "standardize"  # "standardize": (y - mean) / std

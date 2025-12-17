@@ -521,6 +521,321 @@ def print_policy_comparison(results, title="Strategy Policy Comparison"):
 
 
 # ============================================================================
+# Threshold Tuning (Anti-Policy-Overfit)
+# ============================================================================
+
+def generate_threshold_grid(y_pred, n_percentiles=10, min_threshold=0.0, max_threshold=None):
+    """
+    Generate a grid of threshold values based on prediction percentiles.
+    
+    This uses percentiles of |pred| to create a data-driven threshold grid,
+    ensuring thresholds are meaningful relative to the prediction distribution.
+    
+    Args:
+        y_pred: Array of predictions
+        n_percentiles: Number of percentile-based thresholds to generate
+        min_threshold: Minimum threshold value
+        max_threshold: Maximum threshold (if None, uses 95th percentile of |pred|)
+        
+    Returns:
+        Array of threshold values to try
+    """
+    y_pred = np.array(y_pred)
+    abs_pred = np.abs(y_pred)
+    
+    # Generate percentile-based thresholds
+    percentiles = np.linspace(10, 90, n_percentiles)
+    threshold_values = [np.percentile(abs_pred, p) for p in percentiles]
+    
+    # Add some fixed common thresholds for good measure
+    fixed_thresholds = [0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05]
+    
+    # Combine and deduplicate
+    all_thresholds = sorted(set(threshold_values + fixed_thresholds))
+    
+    # Filter by bounds
+    if max_threshold is None:
+        max_threshold = np.percentile(abs_pred, 95)
+    
+    grid = [t for t in all_thresholds if min_threshold <= t <= max_threshold]
+    
+    # Ensure we have at least some thresholds
+    if len(grid) < 3:
+        grid = [0.01, 0.02, 0.03]
+    
+    return np.array(grid)
+
+
+def tune_threshold(y_val_true, y_val_pred, 
+                   criterion='sharpe',
+                   threshold_grid=None,
+                   n_grid_points=10,
+                   min_trade_fraction=0.1,
+                   frequency=None,
+                   returns_for_vol=None,
+                   apply_vol_targeting=False):
+    """
+    Tune the threshold τ for the thresholded policy using validation data.
+    
+    This function performs grid search over threshold values to find the
+    optimal τ that maximizes a given criterion on the validation set.
+    
+    Args:
+        y_val_true: Validation actual returns
+        y_val_pred: Validation predictions
+        criterion: Metric to optimize - one of:
+            - 'sharpe': Maximize Sharpe ratio
+            - 'ic_spread': Maximize IC * decile_spread (predictive spread)
+            - 'total_return': Maximize total return
+            - 'hit_rate': Maximize directional accuracy when trading
+        threshold_grid: Specific thresholds to try (if None, auto-generated)
+        n_grid_points: Number of grid points if auto-generating
+        min_trade_fraction: Minimum fraction of periods that must have trades
+        frequency: Data frequency for annualization
+        returns_for_vol: Returns for volatility targeting (optional)
+        apply_vol_targeting: Whether to apply vol targeting during tuning
+        
+    Returns:
+        Dictionary with:
+            - 'best_threshold': Optimal threshold value
+            - 'best_score': Score achieved at best threshold
+            - 'criterion': Criterion used for optimization
+            - 'grid_results': Full results for all thresholds tried
+            - 'n_thresholds_tried': Number of thresholds evaluated
+    """
+    y_val_true = np.array(y_val_true)
+    y_val_pred = np.array(y_val_pred)
+    n_samples = len(y_val_true)
+    
+    # Generate threshold grid if not provided
+    if threshold_grid is None:
+        threshold_grid = generate_threshold_grid(y_val_pred, n_percentiles=n_grid_points)
+    
+    # Evaluate each threshold
+    grid_results = []
+    best_threshold = threshold_grid[0]
+    best_score = -np.inf
+    
+    for tau in threshold_grid:
+        # Evaluate thresholded policy at this threshold
+        result = evaluate_policy(
+            y_val_true, y_val_pred,
+            policy='thresholded',
+            threshold=tau,
+            returns_for_vol=returns_for_vol,
+            apply_vol_targeting=apply_vol_targeting,
+            frequency=frequency
+        )
+        
+        # Skip if too few trades (policy overfit to no-trade)
+        if result['holding_frequency'] < min_trade_fraction:
+            score = -np.inf
+        else:
+            # Compute score based on criterion
+            if criterion == 'sharpe':
+                score = result['sharpe']
+            elif criterion == 'ic_spread':
+                # IC * decile_spread captures both ranking quality and monetization
+                score = result['ic'] * result['decile_spread']
+            elif criterion == 'total_return':
+                score = result['total_return']
+            elif criterion == 'hit_rate':
+                score = result['win_rate']  # Use win_rate (when trading) not hit_rate
+            else:
+                raise ValueError(f"Unknown criterion: {criterion}")
+        
+        grid_results.append({
+            'threshold': tau,
+            'score': score,
+            'sharpe': result['sharpe'],
+            'total_return': result['total_return'],
+            'hit_rate': result['hit_rate'],
+            'win_rate': result['win_rate'],
+            'ic': result['ic'],
+            'decile_spread': result['decile_spread'],
+            'trade_count': result['trade_count'],
+            'holding_frequency': result['holding_frequency']
+        })
+        
+        if score > best_score:
+            best_score = score
+            best_threshold = tau
+    
+    return {
+        'best_threshold': best_threshold,
+        'best_score': best_score,
+        'criterion': criterion,
+        'grid_results': grid_results,
+        'n_thresholds_tried': len(threshold_grid)
+    }
+
+
+def tune_and_evaluate_fold(y_val_true, y_val_pred, y_test_true, y_test_pred,
+                           criterion='sharpe',
+                           threshold_grid=None,
+                           n_grid_points=10,
+                           min_trade_fraction=0.1,
+                           frequency=None,
+                           returns_for_vol_val=None,
+                           returns_for_vol_test=None,
+                           apply_vol_targeting=False):
+    """
+    Tune threshold on validation set and evaluate on test set.
+    
+    This is the main function for per-fold threshold tuning to avoid
+    policy overfit. The threshold is selected purely on validation data,
+    then applied to the test set without peeking.
+    
+    Args:
+        y_val_true: Validation actual returns
+        y_val_pred: Validation predictions
+        y_test_true: Test actual returns  
+        y_test_pred: Test predictions
+        criterion: Optimization criterion for tuning
+        threshold_grid: Specific thresholds to try
+        n_grid_points: Grid points for auto-generation
+        min_trade_fraction: Minimum trade fraction constraint
+        frequency: Data frequency
+        returns_for_vol_val: Val period returns for vol targeting
+        returns_for_vol_test: Test period returns for vol targeting
+        apply_vol_targeting: Whether to apply vol targeting
+        
+    Returns:
+        Dictionary with:
+            - 'tuned_threshold': The threshold selected on validation
+            - 'val_metrics': Metrics on validation at tuned threshold
+            - 'test_metrics': Metrics on test at tuned threshold
+            - 'tuning_details': Full tuning grid results
+    """
+    # Step 1: Tune on validation
+    tuning_result = tune_threshold(
+        y_val_true, y_val_pred,
+        criterion=criterion,
+        threshold_grid=threshold_grid,
+        n_grid_points=n_grid_points,
+        min_trade_fraction=min_trade_fraction,
+        frequency=frequency,
+        returns_for_vol=returns_for_vol_val,
+        apply_vol_targeting=apply_vol_targeting
+    )
+    
+    best_tau = tuning_result['best_threshold']
+    
+    # Step 2: Evaluate validation at best threshold (for reference)
+    val_metrics = evaluate_policy(
+        y_val_true, y_val_pred,
+        policy='thresholded',
+        threshold=best_tau,
+        returns_for_vol=returns_for_vol_val,
+        apply_vol_targeting=apply_vol_targeting,
+        frequency=frequency
+    )
+    
+    # Step 3: Evaluate test at best threshold (the real evaluation)
+    test_metrics = evaluate_policy(
+        y_test_true, y_test_pred,
+        policy='thresholded',
+        threshold=best_tau,
+        returns_for_vol=returns_for_vol_test,
+        apply_vol_targeting=apply_vol_targeting,
+        frequency=frequency
+    )
+    
+    return {
+        'tuned_threshold': best_tau,
+        'tuning_score': tuning_result['best_score'],
+        'tuning_criterion': criterion,
+        'val_metrics': val_metrics,
+        'test_metrics': test_metrics,
+        'tuning_details': tuning_result
+    }
+
+
+def aggregate_tuned_policy_results(fold_results, include_baseline=True):
+    """
+    Aggregate results from multiple folds with per-fold threshold tuning.
+    
+    Args:
+        fold_results: List of dictionaries from tune_and_evaluate_fold
+        include_baseline: Whether to include baseline (fixed threshold) comparison
+        
+    Returns:
+        Dictionary with aggregated statistics
+    """
+    if not fold_results:
+        return {}
+    
+    # Extract per-fold values
+    thresholds = [f['tuned_threshold'] for f in fold_results]
+    val_sharpes = [f['val_metrics']['sharpe'] for f in fold_results]
+    test_sharpes = [f['test_metrics']['sharpe'] for f in fold_results]
+    test_returns = [f['test_metrics']['total_return'] for f in fold_results]
+    test_hit_rates = [f['test_metrics']['hit_rate'] for f in fold_results]
+    test_trade_counts = [f['test_metrics']['trade_count'] for f in fold_results]
+    test_ics = [f['test_metrics']['ic'] for f in fold_results]
+    
+    # Compute aggregate metrics
+    result = {
+        'n_folds': len(fold_results),
+        'threshold_mean': np.mean(thresholds),
+        'threshold_std': np.std(thresholds),
+        'threshold_min': np.min(thresholds),
+        'threshold_max': np.max(thresholds),
+        'thresholds_per_fold': thresholds,
+        
+        'val_sharpe_mean': np.mean(val_sharpes),
+        'val_sharpe_std': np.std(val_sharpes),
+        
+        'test_sharpe_mean': np.mean(test_sharpes),
+        'test_sharpe_std': np.std(test_sharpes),
+        'test_sharpe_median': np.median(test_sharpes),
+        
+        'test_return_mean': np.mean(test_returns),
+        'test_return_sum': np.sum(test_returns),  # Approx total return
+        
+        'test_hit_rate_mean': np.mean(test_hit_rates),
+        'test_trade_count_total': np.sum(test_trade_counts),
+        'test_ic_mean': np.mean(test_ics),
+        
+        # Detailed per-fold results for logging
+        'fold_details': fold_results
+    }
+    
+    return result
+
+
+def print_threshold_tuning_summary(agg_results, title="Threshold-Tuned Policy Results"):
+    """
+    Print a formatted summary of threshold tuning results.
+    
+    Args:
+        agg_results: Dictionary from aggregate_tuned_policy_results
+        title: Title for the summary
+    """
+    print(f"\n{'='*70}")
+    print(f"{title}")
+    print(f"{'='*70}")
+    
+    print(f"\nThreshold Statistics (across {agg_results['n_folds']} folds):")
+    print(f"  Mean τ:     {agg_results['threshold_mean']:.4f}")
+    print(f"  Std τ:      {agg_results['threshold_std']:.4f}")
+    print(f"  Range:      [{agg_results['threshold_min']:.4f}, {agg_results['threshold_max']:.4f}]")
+    
+    print(f"\nValidation Performance (used for tuning):")
+    print(f"  Sharpe:     {agg_results['val_sharpe_mean']:.3f} ± {agg_results['val_sharpe_std']:.3f}")
+    
+    print(f"\nTest Performance (out-of-sample):")
+    print(f"  Sharpe:     {agg_results['test_sharpe_mean']:.3f} ± {agg_results['test_sharpe_std']:.3f}")
+    print(f"  Hit Rate:   {agg_results['test_hit_rate_mean']:.1%}")
+    print(f"  IC:         {agg_results['test_ic_mean']:.3f}")
+    print(f"  Total Trades: {agg_results['test_trade_count_total']}")
+    print(f"  Approx Return: {agg_results['test_return_sum']:.2%}")
+    
+    print(f"\nPer-Fold Thresholds: {[f'{t:.4f}' for t in agg_results['thresholds_per_fold']]}")
+    print(f"{'='*70}\n")
+
+
+# ============================================================================
 # Legacy Compatibility Functions
 # ============================================================================
 
