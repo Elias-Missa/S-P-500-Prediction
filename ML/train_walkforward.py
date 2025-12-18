@@ -616,6 +616,15 @@ def main():
                 # If all else fails, skip date collection for this fold
                 pass
         
+        # Collect all dates for Boss Report
+        if hasattr(y_test, 'index'):
+             all_test_dates.extend(y_test.index.tolist())
+        elif hasattr(test_idx, '__iter__'):
+             try:
+                 all_test_dates.extend(df.index[test_idx].tolist())
+             except:
+                 pass
+        
         # Store validation predictions if available
         if y_val_pred is not None and y_val_actual is not None:
             all_val_preds.extend(y_val_pred)
@@ -1020,6 +1029,52 @@ def main():
         target_scaling_info=None,  # Walk-forward uses per-fold scaling, so no single value
         fold_metrics=fold_metrics_list
     )
+
+    # --- PREPARE DATA FOR BOSS REPORT ---
+    print("\nGenerating Boss Report...")
+    
+    # 1. Reload data to ensure we have the raw daily returns
+    full_data_w_returns = data_prep.load_and_prep_data() 
+    
+    # 2. Ensure 'Return_1D' exists (Calculated from Price if missing)
+    if 'Return_1D' not in full_data_w_returns.columns:
+        if 'Adj Close' in full_data_w_returns.columns:
+            full_data_w_returns['Return_1D'] = full_data_w_returns['Adj Close'].pct_change()
+        else:
+            print("Warning: 'Adj Close' not found. Approximating daily returns from target.")
+            full_data_w_returns['Return_1D'] = full_data_w_returns[config.TARGET_COL] / 21.0 
+
+    # 3. Align dates and returns
+    test_dates = pd.DatetimeIndex(all_test_dates) 
+    
+    # We need to match the length of all_preds
+    if len(test_dates) != len(all_preds):
+        print(f"Warning: Date count ({len(test_dates)}) != Prediction count ({len(all_preds)}). Truncating to minimum.")
+        min_len = min(len(test_dates), len(all_preds))
+        test_dates = test_dates[:min_len]
+        all_preds = all_preds[:min_len]
+
+    aligned_daily_rets = full_data_w_returns.loc[test_dates, 'Return_1D']
+    
+    # 4. Run the Backtest Engine
+    from ML.backtest_engine import BacktestEngine
+    
+    engine = BacktestEngine(
+        predictions=all_preds,
+        dates=test_dates,
+        daily_returns=aligned_daily_rets,
+        target_horizon=21
+    )
+    
+    boss_report = engine.generate_boss_report_md()
+    
+    # 5. Append to Summary & Print
+    print(boss_report)
+    
+    with open(logger.summary_path, 'a', encoding='utf-8') as f:
+        f.write(boss_report)
+    
+    print(f"\n✅ Boss Report appended to: {logger.summary_path}")
 
 if __name__ == "__main__":
     import argparse
