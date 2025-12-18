@@ -1050,23 +1050,50 @@ def main():
     # 4. Run the Backtest Engine
     from ML.backtest_engine import BacktestEngine
     
+    # Get feature data for regime analysis (if available)
+    feature_data = None
+    if 'RV_Ratio' in full_data_w_returns.columns:
+        feature_data = full_data_w_returns[['RV_Ratio']].loc[test_dates]
+    
     engine = BacktestEngine(
         predictions=all_preds,
         dates=test_dates,
         daily_returns=aligned_daily_rets,
-        target_horizon=21
+        target_horizon=21,
+        feature_data=feature_data
     )
     
-    boss_report = engine.generate_boss_report_md()
+    # Generate comprehensive boss report and save to Excel/CSV
+    boss_report_path = os.path.join(logger.run_dir, "boss_report")
+    boss_sheets = engine.generate_boss_report_excel(save_path=boss_report_path)
     
-    # 5. Append to Summary & Print
-    print(boss_report)
+    # Print summary to console
+    print("\n" + "="*80)
+    print("💼 BOSS REPORT SUMMARY")
+    print("="*80)
+    print(boss_sheets['Summary'].to_string(index=False))
+    print(f"\n✅ Full Boss Report saved to Excel with {len(boss_sheets)} sheets in: {logger.run_dir}")
+    print("   Sheets: Summary, Monthly Returns, Quarterly Returns, Rolling Metrics,")
+    print("          Regime Analysis, Trade Analysis, Period Sharpe")
     
+    # Add brief note to summary.md instead of full report
     summary_path = os.path.join(logger.run_dir, "summary.md")
     with open(summary_path, 'a', encoding='utf-8') as f:
-        f.write(boss_report)
+        f.write("\n## 💼 Boss Report\n")
+        f.write("> Comprehensive trading strategy analysis saved to `boss_report.xlsx` and `boss_report.csv`\n")
+        f.write("> \n")
+        f.write("> **Excel File Includes:**\n")
+        f.write("> - Summary: Core performance metrics for all strategies\n")
+        f.write("> - Monthly Returns: Month-by-month breakdown\n")
+        f.write("> - Quarterly Returns: Quarter-by-quarter breakdown\n")
+        f.write("> - Rolling Metrics: 6-month and 12-month rolling Sharpe ratios\n")
+        f.write("> - Regime Analysis: Performance in Low/High volatility regimes\n")
+        f.write("> - Trade Analysis: Trade-level statistics (holding periods, largest wins/losses)\n")
+        f.write("> - Period Sharpe: Annual and Quarterly Sharpe ratios\n")
+        f.write("> \n")
+        f.write("> Simulation includes 5bps transaction costs per turnover.\n\n")
     
-    print(f"\n✅ Boss Report appended to: {summary_path}")
+    print(f"\n✅ Summary note added to: {summary_path}")
 
 if __name__ == "__main__":
     import argparse

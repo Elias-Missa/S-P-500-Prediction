@@ -1,0 +1,5 @@
+Strategy,Total Return,CAGR,Volatility,Sharpe Ratio,Sortino Ratio,Calmar Ratio,Max Drawdown,DD Duration (days),Win Rate,Profit Factor,Beta vs SPY,Correlation vs SPY,Best Month,Worst Month,Skewness,Kurtosis,VaR (95%),CVaR (95%),Avg Trade Return,Number of Trades
+SPY Buy & Hold,83.51%,20.72%,2.73%,7.60,7.04,1.83,-11.32%,91,74.2%,3.19,1.00,1.000,9.36%,-6.53%,-0.46,1.24,-0.23%,-0.33%,0.08%,740
+L/S (Daily Overlap),40.66%,11.64%,2.22%,5.24,5.08,1.03,-11.33%,109,65.0%,2.50,0.59,0.721,6.94%,-6.53%,-0.37,2.62,-0.17%,-0.31%,0.05%,719
+L/S (Monthly Rebal),66.53%,17.41%,2.82%,6.18,6.15,1.28,-13.57%,130,68.6%,2.56,0.82,0.794,9.36%,-6.53%,-0.32,0.77,-0.24%,-0.34%,0.07%,739
+Big Move (Daily),10.60%,3.43%,0.82%,4.21,15.02,7.40,-0.46%,182,27.0%,10.48,0.15,0.488,5.55%,-0.32%,5.19,32.35,-0.01%,-0.02%,0.03%,296
