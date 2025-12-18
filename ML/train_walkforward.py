@@ -616,15 +616,6 @@ def main():
                 # If all else fails, skip date collection for this fold
                 pass
         
-        # Collect all dates for Boss Report
-        if hasattr(y_test, 'index'):
-             all_test_dates.extend(y_test.index.tolist())
-        elif hasattr(test_idx, '__iter__'):
-             try:
-                 all_test_dates.extend(df.index[test_idx].tolist())
-             except:
-                 pass
-        
         # Store validation predictions if available
         if y_val_pred is not None and y_val_actual is not None:
             all_val_preds.extend(y_val_pred)
@@ -1071,10 +1062,11 @@ def main():
     # 5. Append to Summary & Print
     print(boss_report)
     
-    with open(logger.summary_path, 'a', encoding='utf-8') as f:
+    summary_path = os.path.join(logger.run_dir, "summary.md")
+    with open(summary_path, 'a', encoding='utf-8') as f:
         f.write(boss_report)
     
-    print(f"\n✅ Boss Report appended to: {logger.summary_path}")
+    print(f"\n✅ Boss Report appended to: {summary_path}")
 
 if __name__ == "__main__":
     import argparse

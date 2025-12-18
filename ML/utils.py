@@ -169,7 +169,10 @@ class ExperimentLogger:
             if "Static" in self.run_dir:
                 f.write("> **Static Validation**: The model is trained *once* on a fixed historical period (e.g., 2017-2022) and tested on a subsequent unseen period (e.g., 2023-Present). This mimics a 'set and forget' approach and tests how well a single model generalizes over time without retraining.\n\n")
             elif "WalkForward" in self.run_dir:
-                f.write("> **Walk-Forward Validation**: The model is retrained periodically (e.g., every month) as new data becomes available. This mimics a real-world trading strategy where the model adapts to recent market regimes. It is generally more robust but computationally expensive.\n\n")
+                f.write("> **Walk-Forward Validation**: The model is retrained periodically (e.g., every month) as new data becomes available. This mimics a real-world trading strategy where the model adapts to recent market regimes. It is generally more robust but computationally expensive.\n")
+                f.write("> - **Training**: Uses a rolling window of past data (e.g., 10 years) to learn patterns.\n")
+                f.write("> - **Validation**: (Optional) A slice of data immediately following the training set, used for hyperparameter tuning or threshold selection.\n")
+                f.write("> - **Testing**: The model predicts the *next* unseen month (or period). These predictions are collected to form the full out-of-sample track record.\n\n")
             
             # 1b. Hyperparameter Tuning
             f.write("## Hyperparameter Tuning\n")
@@ -247,6 +250,10 @@ class ExperimentLogger:
                 f.write("> **Linear Regression**: A simple model that assumes a linear relationship between features and the target. Good for establishing a baseline.\n")
             elif model_type == 'MLP':
                 f.write("> **MLP (Multi-Layer Perceptron)**: A classic feedforward neural network. It learns non-linear relationships through layers of neurons.\n")
+            elif model_type == 'RegimeGatedRidge':
+                f.write("> **Regime-Gated Ridge**: A specialized model that adapts to market volatility. It splits the training data into 'Low Volatility' and 'High Volatility' regimes based on the `RV_Ratio` (Realized Volatility Ratio). Two separate Ridge Regression models are trained—one for each regime. During prediction, the model detects the current regime and routes the input to the appropriate sub-model. This allows it to be aggressive in calm markets and conservative (or different) in turbulent ones.\n")
+            elif model_type == 'RegimeGatedHybrid':
+                f.write("> **Regime-Gated Hybrid**: An advanced evolution of the regime-gated approach. It uses a **Ridge Regression** model for the 'Low Volatility' regime (where linear trends often persist) and a **Random Forest** (or other non-linear model) for the 'High Volatility' regime (where relationships become complex and non-linear). This hybrid structure aims to capture the best of both worlds: stability in calm markets and adaptability in crashes/rallies.\n")
             f.write("\n")
             
             f.write("## Model Parameters\n")

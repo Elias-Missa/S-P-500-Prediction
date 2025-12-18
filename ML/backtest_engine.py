@@ -73,30 +73,56 @@ class BacktestEngine:
         bench_ret = self.df['market_ret']
         bench_metrics = financial_metrics.generate_boss_metrics(bench_ret)
         
-        # Header
-        md = "\n## 💼 Boss Report: Trading Strategy Analysis\n"
-        md += "> Simulation includes 5bps transaction costs per turnover.\n\n"
-        
-        # Construct Table Headers
-        # Get keys from benchmark metrics
-        metric_names = list(bench_metrics.keys())
-        headers = ["Strategy"] + metric_names
-        
-        md += "| " + " | ".join(headers) + " |\n"
-        md += "| " + " | ".join(["---"] * len(headers)) + " |\n"
-        
-        # Add Benchmark Row
-        row = ["**SPY Buy & Hold**"] + list(bench_metrics.values())
-        md += "| " + " | ".join(row) + " |\n"
+        # Prepare Data Rows
+        rows = []
+        # Add Benchmark
+        rows.append(["**SPY Buy & Hold**"] + list(bench_metrics.values()))
         
         # Run Scenarios
         for name, mode, strat in scenarios:
             try:
                 rets = self.run_scenario(mode, strat)
                 m = financial_metrics.generate_boss_metrics(rets)
-                row = [name] + list(m.values())
-                md += "| " + " | ".join(row) + " |\n"
+                rows.append([name] + list(m.values()))
             except Exception as e:
                 print(f"Skipping scenario {name}: {e}")
+
+        # Define Column Groups
+        # Full keys: Total Return, CAGR, Volatility, Sharpe, Sortino, Calmar, Max DD, DD Duration, Win Rate, Profit Factor
+        keys = list(bench_metrics.keys())
+        
+        # Table 1: Returns & Risk
+        # Indices: 0, 1, 2, 3, 4, 5 (Total Return to Calmar)
+        headers_1 = ["Strategy"] + keys[:6]
+        
+        # Table 2: Drawdown & Trade Stats
+        # Indices: 6, 7, 8, 9 (Max DD to Profit Factor)
+        headers_2 = ["Strategy"] + keys[6:]
+        
+        # Construct Markdown
+        md = "\n## 💼 Boss Report: Trading Strategy Analysis\n"
+        md += "> Simulation includes 5bps transaction costs per turnover.\n\n"
+        
+        # --- Table 1 ---
+        md += "### 📈 Returns & Risk Metrics\n"
+        md += "| " + " | ".join(headers_1) + " |\n"
+        md += "| " + " | ".join(["---"] * len(headers_1)) + " |\n"
+        
+        for row in rows:
+            # Strategy Name + First 6 metrics
+            table_row = [row[0]] + row[1:7]
+            md += "| " + " | ".join(table_row) + " |\n"
+            
+        md += "\n"
+        
+        # --- Table 2 ---
+        md += "### 📉 Drawdown & Trade Stats\n"
+        md += "| " + " | ".join(headers_2) + " |\n"
+        md += "| " + " | ".join(["---"] * len(headers_2)) + " |\n"
+        
+        for row in rows:
+            # Strategy Name + Remaining metrics
+            table_row = [row[0]] + row[7:]
+            md += "| " + " | ".join(table_row) + " |\n"
             
         return md
