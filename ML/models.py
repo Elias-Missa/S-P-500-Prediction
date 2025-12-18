@@ -1,3 +1,4 @@
+import numpy as np
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.neural_network import MLPRegressor
@@ -21,10 +22,9 @@ class ModelFactory:
 
         elif model_type == 'Ridge':
             # Ridge regression with optional overrides (e.g., alpha)
-            params = {}
+            params = {'alpha': 1.0, 'random_state': 42}
             # Allow alpha and other sklearn Ridge kwargs via overrides
-            for k, v in overrides.items():
-                params[k] = v
+            params.update({k: v for k, v in overrides.items() if k in ['alpha', 'fit_intercept', 'copy_X', 'max_iter', 'tol', 'solver', 'positive', 'random_state']})
             return Ridge(**params)
 
         elif model_type == 'RandomForest':
@@ -98,8 +98,139 @@ class ModelFactory:
                 dropout=config.TRANSFORMER_DROPOUT
             )
             
+        elif model_type == 'RegimeGatedRidge':
+            # Regime-gated Ridge regression
+            params = {'alpha': 1.0, 'regime_col': 'RV_Ratio'}
+            params.update({k: v for k, v in overrides.items() if k in ['alpha', 'regime_col', 'fit_intercept', 'copy_X', 'max_iter', 'tol', 'solver', 'positive', 'random_state']})
+            return RegimeGatedRidge(**params)
+
+        elif model_type == 'RegimeGatedHybrid':
+            # Hybrid Regime-gated model (e.g. Ridge + RF)
+            params = {}
+            for k, v in overrides.items():
+                params[k] = v
+            # Extract sub-model types from config if not in overrides
+            low_model = params.pop('low_model', getattr(config, 'REGIME_LOW_MODEL', 'Ridge'))
+            high_model = params.pop('high_model', getattr(config, 'REGIME_HIGH_MODEL', 'RandomForest'))
+            return RegimeGatedHybrid(low_model=low_model, high_model=high_model, **params)
+
         else:
             raise ValueError(f"Unknown model type: {model_type}")
+
+class RegimeGatedRidge:
+    def __init__(self, alpha=1.0, regime_col='RV_Ratio', **kwargs):
+        self.alpha = alpha
+        self.regime_col = regime_col
+        self.kwargs = kwargs
+        self.low_vol_model = Ridge(alpha=alpha, **kwargs)
+        self.high_vol_model = Ridge(alpha=alpha, **kwargs)
+        self.regime_threshold = None
+        
+    def fit(self, X, y):
+        # Check if regime_col is in X
+        if self.regime_col not in X.columns:
+            raise ValueError(f"Regime column '{self.regime_col}' not found in features.")
+            
+        # Calculate median of regime_col
+        self.regime_threshold = X[self.regime_col].median()
+        
+        # Split data
+        low_vol_mask = X[self.regime_col] <= self.regime_threshold
+        high_vol_mask = ~low_vol_mask
+        
+        # Train models
+        if low_vol_mask.sum() > 0:
+            self.low_vol_model.fit(X[low_vol_mask], y[low_vol_mask])
+        
+        if high_vol_mask.sum() > 0:
+            self.high_vol_model.fit(X[high_vol_mask], y[high_vol_mask])
+            
+        return self
+        
+    def predict(self, X):
+        if self.regime_threshold is None:
+            raise ValueError("Model not fitted yet.")
+            
+        if self.regime_col not in X.columns:
+            raise ValueError(f"Regime column '{self.regime_col}' not found in features.")
+            
+        # Identify regimes
+        low_vol_mask = X[self.regime_col] <= self.regime_threshold
+        high_vol_mask = ~low_vol_mask
+        
+        # Predict
+        y_pred = np.zeros(len(X))
+        
+        if low_vol_mask.sum() > 0:
+            y_pred[low_vol_mask] = self.low_vol_model.predict(X[low_vol_mask])
+            
+        if high_vol_mask.sum() > 0:
+            y_pred[high_vol_mask] = self.high_vol_model.predict(X[high_vol_mask])
+            
+        return y_pred
+
+class RegimeGatedHybrid:
+    def __init__(self, low_model='Ridge', high_model='RandomForest', regime_col='RV_Ratio', **kwargs):
+        self.low_model_type = low_model
+        self.high_model_type = high_model
+        self.regime_col = regime_col
+        self.kwargs = kwargs
+        
+        # Instantiate sub-models using ModelFactory
+        # We need to handle potential recursion if we passed RegimeGatedHybrid again, but we won't do that.
+        # We also need to pass kwargs down, but ModelFactory.get_model takes overrides.
+        
+        # Note: ModelFactory is a static class, so we can call it directly.
+        # However, we are inside models.py, so we can just call ModelFactory.get_model.
+        # But wait, ModelFactory is defined above.
+        
+        self.low_vol_model = ModelFactory.get_model(low_model, overrides=kwargs)
+        self.high_vol_model = ModelFactory.get_model(high_model, overrides=kwargs)
+        
+        self.regime_threshold = None
+        
+    def fit(self, X, y):
+        # Check if regime_col is in X
+        if self.regime_col not in X.columns:
+            raise ValueError(f"Regime column '{self.regime_col}' not found in features.")
+            
+        # Calculate median of regime_col
+        self.regime_threshold = X[self.regime_col].median()
+        
+        # Split data
+        low_vol_mask = X[self.regime_col] <= self.regime_threshold
+        high_vol_mask = ~low_vol_mask
+        
+        # Train models
+        if low_vol_mask.sum() > 0:
+            self.low_vol_model.fit(X[low_vol_mask], y[low_vol_mask])
+        
+        if high_vol_mask.sum() > 0:
+            self.high_vol_model.fit(X[high_vol_mask], y[high_vol_mask])
+            
+        return self
+        
+    def predict(self, X):
+        if self.regime_threshold is None:
+            raise ValueError("Model not fitted yet.")
+            
+        if self.regime_col not in X.columns:
+            raise ValueError(f"Regime column '{self.regime_col}' not found in features.")
+            
+        # Identify regimes
+        low_vol_mask = X[self.regime_col] <= self.regime_threshold
+        high_vol_mask = ~low_vol_mask
+        
+        # Predict
+        y_pred = np.zeros(len(X))
+        
+        if low_vol_mask.sum() > 0:
+            y_pred[low_vol_mask] = self.low_vol_model.predict(X[low_vol_mask])
+            
+        if high_vol_mask.sum() > 0:
+            y_pred[high_vol_mask] = self.high_vol_model.predict(X[high_vol_mask])
+            
+        return y_pred
 
 class LSTMModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, num_layers, output_dim=1, dropout=0.2):

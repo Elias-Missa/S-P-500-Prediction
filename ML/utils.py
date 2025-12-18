@@ -63,6 +63,8 @@ class ExperimentLogger:
             'RandomForest': 'randomforest',
             'CNN': 'cnn',
             'Ensemble': 'ensemble',
+            'RegimeGatedRidge': 'regimegatedridge',
+            'RegimeGatedHybrid': 'DualVolRidgeTree',
         }
         
         # Get model type subdirectory (default to lowercase model_name if not in map)

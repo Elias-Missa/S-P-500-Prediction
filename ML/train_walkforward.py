@@ -699,6 +699,47 @@ def main():
                 'strategy_sharpe': fold_strat['sharpe'],
                 'big_move_sharpe': fold_bigmove_strat['sharpe']
             }
+
+            # --- Regime-Specific Metrics (if RegimeGatedRidge or RegimeGatedHybrid) ---
+            if config.MODEL_TYPE in ['RegimeGatedRidge', 'RegimeGatedHybrid'] and hasattr(model, 'regime_threshold'):
+                regime_col = getattr(config, 'REGIME_COL', 'RV_Ratio')
+                if regime_col in X_test.columns:
+                    # Identify regimes in test set using the trained threshold
+                    test_regime_vals = X_test[regime_col]
+                    low_vol_mask = test_regime_vals <= model.regime_threshold
+                    high_vol_mask = ~low_vol_mask
+                    
+                    # Low Vol Metrics
+                    if low_vol_mask.sum() > 5:
+                        y_test_low = y_test_arr[low_vol_mask]
+                        y_pred_low = y_pred_arr[low_vol_mask]
+                        low_ic = metrics.calculate_ic(y_test_low, y_pred_low)
+                        low_decile = metrics.calculate_decile_analysis(y_test_low, y_pred_low)
+                        fold_entry['low_vol_ic'] = low_ic
+                        fold_entry['low_vol_spread'] = low_decile['spread']
+                        fold_entry['low_vol_count'] = int(low_vol_mask.sum())
+                    else:
+                        fold_entry['low_vol_ic'] = np.nan
+                        fold_entry['low_vol_spread'] = np.nan
+                        fold_entry['low_vol_count'] = 0
+                        
+                    # High Vol Metrics
+                    if high_vol_mask.sum() > 5:
+                        y_test_high = y_test_arr[high_vol_mask]
+                        y_pred_high = y_pred_arr[high_vol_mask]
+                        high_ic = metrics.calculate_ic(y_test_high, y_pred_high)
+                        high_decile = metrics.calculate_decile_analysis(y_test_high, y_pred_high)
+                        fold_entry['high_vol_ic'] = high_ic
+                        fold_entry['high_vol_spread'] = high_decile['spread']
+                        fold_entry['high_vol_count'] = int(high_vol_mask.sum())
+                    else:
+                        fold_entry['high_vol_ic'] = np.nan
+                        fold_entry['high_vol_spread'] = np.nan
+                        fold_entry['high_vol_count'] = 0
+                        
+                    print(f"  Regime Split: Low Vol={fold_entry['low_vol_count']}, High Vol={fold_entry['high_vol_count']}")
+                    print(f"  Low Vol IC: {fold_entry['low_vol_ic']:.4f}, Spread: {fold_entry['low_vol_spread']:.4f}")
+                    print(f"  High Vol IC: {fold_entry['high_vol_ic']:.4f}, Spread: {fold_entry['high_vol_spread']:.4f}")
             
             # Add validation metrics if available
             if y_val_pred is not None and y_val_actual is not None and len(y_val_actual) > 0:

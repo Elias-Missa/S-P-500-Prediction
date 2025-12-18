@@ -65,7 +65,10 @@ EMBARGO_ROWS = EMBARGO_ROWS_DAILY if DATA_FREQUENCY == "daily" else EMBARGO_ROWS
 
 # Model Parameters
 # Options: 'LinearRegression', 'RandomForest', 'XGBoost', 'MLP', 'LSTM', 'CNN', 'Transformer', 'Ridge'
-MODEL_TYPE = 'Ridge'
+MODEL_TYPE = 'RegimeGatedHybrid'
+REGIME_COL = 'RV_Ratio'
+REGIME_LOW_MODEL = 'Ridge'
+REGIME_HIGH_MODEL = 'RandomForest'
 BASIC_MODEL_SUITE = ['LinearRegression', 'RandomForest', 'XGBoost', 'MLP']
 
 # Ridge Regression
