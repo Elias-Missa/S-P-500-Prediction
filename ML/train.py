@@ -31,12 +31,16 @@ def evaluate(y_true, y_pred, set_name="Val"):
     big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
     pred_clip = getattr(config, 'PRED_CLIP', None)
     
+    
+    # Extract dates for monthly execution support
+    dates = y_true.index if hasattr(y_true, 'index') else None
+    
     # Strategy metrics (with optional prediction clipping)
-    strat_metrics = metrics.calculate_strategy_metrics(y_true, y_pred, pred_clip=pred_clip)
+    strat_metrics = metrics.calculate_strategy_metrics(y_true, y_pred, pred_clip=pred_clip, dates=dates)
     tail_metrics = metrics.calculate_tail_metrics(y_true, y_pred, threshold=big_move_thresh)
     
     # Big-move-only strategy metrics (with optional prediction clipping)
-    bigmove_strat = metrics.calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=big_move_thresh, pred_clip=pred_clip)
+    bigmove_strat = metrics.calculate_bigmove_strategy_metrics(y_true, y_pred, threshold=big_move_thresh, pred_clip=pred_clip, dates=dates)
     
     print(f"IC: {ic:.4f}")
     print(f"\n  [Always-In Strategy]")
@@ -509,9 +513,18 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_type', type=str, help='Model type to train')
+    parser.add_argument('--optimize', action='store_true', help='Enable Optuna hyperparameter tuning')
+    parser.add_argument('--trials', type=int, default=20, help='Number of Optuna trials')
     args = parser.parse_args()
     
     if args.model_type:
         config.MODEL_TYPE = args.model_type
+        
+    if args.optimize:
+        config.USE_OPTUNA = True
+        print(f"Hyperparameter Tuning Enabled (Trials: {args.trials})")
+        
+    if args.trials:
+        config.OPTUNA_TRIALS = args.trials
         
     main()

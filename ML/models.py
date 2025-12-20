@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from . import config
 from .transformer import TransformerModel
+from .tft_model import TFTModel
 
 class ModelFactory:
     @staticmethod
@@ -98,6 +99,18 @@ class ModelFactory:
                 dropout=config.TRANSFORMER_DROPOUT
             )
             
+        elif model_type == 'TFT':
+            if input_dim is None:
+                raise ValueError("input_dim must be provided for TFT")
+            return TFTModel(
+                input_dim=input_dim,
+                hidden_dim=config.TFT_HIDDEN_DIM,
+                num_heads=config.TFT_NUM_HEADS,
+                num_layers=config.TFT_LAYERS,
+                dropout=config.TFT_DROPOUT,
+                output_dim=1
+            )
+
         elif model_type == 'RegimeGatedRidge':
             # Regime-gated Ridge regression
             params = {'alpha': 1.0, 'regime_col': 'RV_Ratio'}
@@ -146,6 +159,15 @@ class RegimeGatedRidge:
             self.high_vol_model.fit(X[high_vol_mask], y[high_vol_mask])
             
         return self
+
+    @property
+    def feature_importances_(self):
+        """Returns average coefficients of low and high vol models."""
+        try:
+            return (self.low_vol_model.coef_ + self.high_vol_model.coef_) / 2.0
+        except Exception:
+            return None
+        
         
     def predict(self, X):
         if self.regime_threshold is None:
@@ -209,6 +231,19 @@ class RegimeGatedHybrid:
             self.high_vol_model.fit(X[high_vol_mask], y[high_vol_mask])
             
         return self
+
+    @property
+    def feature_importances_(self):
+        """Averages importance from both sub-models."""
+        try:
+            low_fi = getattr(self.low_vol_model, 'feature_importances_', getattr(self.low_vol_model, 'coef_', None))
+            high_fi = getattr(self.high_vol_model, 'feature_importances_', getattr(self.high_vol_model, 'coef_', None))
+            if low_fi is not None and high_fi is not None:
+                return (low_fi + high_fi) / 2.0
+            return low_fi if low_fi is not None else high_fi
+        except Exception:
+            return None
+        
         
     def predict(self, X):
         if self.regime_threshold is None:

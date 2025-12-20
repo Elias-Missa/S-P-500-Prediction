@@ -105,6 +105,7 @@ def main():
     feature_cols = [c for c in df.columns if c not in exclude_cols]
     
     all_preds = []
+    all_feature_importances = []  # Store importances per fold
     all_actuals = []
     fold_metrics_list = []  # Store per-fold metrics
     threshold_tuning_results = []  # Store per-fold threshold tuning results
@@ -119,7 +120,11 @@ def main():
     if config.WF_USE_TUNED_PARAMS and config.WF_BEST_PARAMS_PATH and os.path.exists(config.WF_BEST_PARAMS_PATH):
         # Load pre-tuned params from file
         with open(config.WF_BEST_PARAMS_PATH, 'r') as f:
-            best_params = json.load(f)
+            tuned = json.load(f)
+        
+        # EXPOSE TUNED PARAMS FOR REPORTING (Crucial Change)
+        best_params = tuned
+        
         print(f"Using pre-tuned parameters from {config.WF_BEST_PARAMS_PATH}")
         logger.set_tuning_info(
             method=f"Pre-tuned parameters loaded from file",
@@ -128,6 +133,56 @@ def main():
             tune_end_date=None,
             n_trials=None,
         )
+        
+        # Backward compatibility for Transformer config overrides
+        if config.MODEL_TYPE == 'Transformer':
+             # Override Transformer params - support Optuna keys with backward compatibility
+            # Prefer Optuna keys (num_heads, num_layers, dim_feedforward) over old keys (heads, layers, ff_dim)
+            if 'model_dim' in tuned:
+                config.TRANSFORMER_MODEL_DIM = tuned['model_dim']
+            
+            # num_heads (Optuna) or heads (backward compat)
+            if 'num_heads' in tuned:
+                config.TRANSFORMER_HEADS = tuned['num_heads']
+            elif 'heads' in tuned:
+                config.TRANSFORMER_HEADS = tuned['heads']
+            
+            # num_layers (Optuna) or layers (backward compat)
+            if 'num_layers' in tuned:
+                config.TRANSFORMER_LAYERS = tuned['num_layers']
+            elif 'layers' in tuned:
+                config.TRANSFORMER_LAYERS = tuned['layers']
+            
+            # dim_feedforward (Optuna) or ff_dim (backward compat)
+            if 'dim_feedforward' in tuned:
+                config.TRANSFORMER_FEEDFORWARD_DIM = tuned['dim_feedforward']
+            elif 'ff_dim' in tuned:
+                config.TRANSFORMER_FEEDFORWARD_DIM = tuned['ff_dim']
+            
+            if 'dropout' in tuned:
+                config.TRANSFORMER_DROPOUT = tuned['dropout']
+            if 'lr' in tuned:
+                config.TRANSFORMER_LR = tuned['lr']
+            if 'weight_decay' in tuned:
+                config.TRANSFORMER_WEIGHT_DECAY = tuned['weight_decay']
+            if 'batch_size' in tuned:
+                config.TRANSFORMER_BATCH_SIZE = tuned['batch_size']
+            if 'time_steps' in tuned:
+                config.TRANSFORMER_TIME_STEPS = tuned['time_steps']
+            
+            # Print final overrides in a clean format
+            print("\n--- Final Transformer Overrides ---")
+            print(f"  model_dim:        {config.TRANSFORMER_MODEL_DIM}")
+            print(f"  num_heads:        {config.TRANSFORMER_HEADS}")
+            print(f"  num_layers:       {config.TRANSFORMER_LAYERS}")
+            print(f"  dim_feedforward:  {config.TRANSFORMER_FEEDFORWARD_DIM}")
+            print(f"  dropout:          {config.TRANSFORMER_DROPOUT}")
+            print(f"  lr:               {config.TRANSFORMER_LR}")
+            print(f"  weight_decay:    {config.TRANSFORMER_WEIGHT_DECAY}")
+            print(f"  batch_size:       {config.TRANSFORMER_BATCH_SIZE}")
+            print(f"  time_steps:       {config.TRANSFORMER_TIME_STEPS}")
+            print("---\n")
+
     elif config.USE_OPTUNA:
         print("\n=== Starting Optuna Hyperparameter Tuning ===")
         # Use the first fold's data for tuning, or use tuning window if available
@@ -240,7 +295,7 @@ def main():
         y_train_actual = None
         
         # Train
-        if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
+        if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer', 'TFT']:
             # --- Deep Learning Training Logic ---
             # Determine time_steps for deep models (use tuned params if available)
             time_steps = None
@@ -249,7 +304,10 @@ def main():
             elif config.MODEL_TYPE == 'CNN':
                 time_steps = best_params.get('time_steps', getattr(config, 'CNN_TIME_STEPS', 10))
             elif config.MODEL_TYPE == 'Transformer':
-                time_steps = best_params.get('time_steps', getattr(config, 'TRANSFORMER_TIME_STEPS', 20))
+                time_steps = best_params.get('time_steps', config.TRANSFORMER_TIME_STEPS)
+            elif config.MODEL_TYPE == 'TFT':
+                # TFT needs lookback. Default to Transformer's setting or Hardcode 63 (3 months)
+                time_steps = 63 
             
             if time_steps is not None and fold == 0:
                 print(f"Using time_steps={time_steps} for sequence creation")
@@ -263,26 +321,83 @@ def main():
             if scaling_mode == "vol_scale":
                 # Vol-scale: divide by std only (keeps 0 at 0)
                 y_mean = 0.0
-                y_train_scaled = y_train / y_std
-                y_test_scaled = y_test / y_std
-            else:
-                # Standardize: (y - mean) / std
-                y_mean = y_train.mean()
-                y_train_scaled = (y_train - y_mean) / y_std
-                y_test_scaled = (y_test - y_mean) / y_std
             
-            print(f"  Fold {fold} target scaling ({scaling_mode}): y_mean={y_mean:.6f}, y_std={y_std:.6f}")
+            # --- Fetch Lookback for Test/Val ---
+            # We need previous (time_steps-1) rows to predict the first test/val point
+            lookback = time_steps - 1
             
-            # 2. Scale Features (Fit on Train, Transform on Test)
+            # Helper to fetch expanded data
+            def get_expanded_data(indices, df_full, lookback_amount):
+                if len(indices) == 0:
+                    return None, None
+                
+                # Convert Timestamp to integer position
+                start_date = indices[0]
+                end_date = indices[-1]
+                
+                # Handle potential duplicate indices or non-unique (though unlikely here)
+                # Use searchsorted if monotonic, or get_loc
+                try:
+                    start_pos = df_full.index.get_loc(start_date)
+                    end_pos = df_full.index.get_loc(end_date)
+                except KeyError:
+                    # Fallback if somehow index not found (should not happen)
+                    return None, None
+                
+                # get_loc might return slice for duplicates, take start/stop
+                if isinstance(start_pos, slice):
+                    start_pos = start_pos.start
+                if isinstance(end_pos, slice):
+                    end_pos = end_pos.stop - 1 # inclusive
+                if hasattr(start_pos, '__iter__'): # boolean mask or array
+                     start_pos = start_pos[0]
+                if hasattr(end_pos, '__iter__'):
+                     end_pos = end_pos[-1]
+                
+                # Ensure we don't go below 0
+                expanded_start = max(0, start_pos - lookback_amount)
+                
+                # Slice range
+                X_expanded = df_full.iloc[expanded_start : end_pos + 1][feature_cols]
+                y_expanded = df_full.iloc[expanded_start : end_pos + 1][target_col]
+                return X_expanded, y_expanded
+
+            # Expand Test
+            X_test_dl, y_test_dl = get_expanded_data(test_idx, df, lookback)
+            
+            # Expand Val if exists
+            X_val_dl = None
+            y_val_dl = None
+            if has_val_set and len(val_idx) > 0:
+                X_val_dl, y_val_dl = get_expanded_data(val_idx, df, lookback)
+
+            # Scale features
             scaler = StandardScaler()
             X_train_scaled = scaler.fit_transform(X_train)
-            X_test_scaled = scaler.transform(X_test)
+            
+            # Transform Test/Val using expanded data
+            X_test_scaled = scaler.transform(X_test_dl)
+            
+            # Scale targets
+            if scaling_mode == "vol_scale":
+                y_train_scaled = y_train / y_std
+                y_test_scaled = y_test_dl / y_std
+            else:
+                y_mean = y_train.mean()
+                y_train_scaled = (y_train - y_mean) / y_std
+                y_test_scaled = (y_test_dl - y_mean) / y_std
             
             # 3. Reshape to 3D Sequences (using scaled targets)
             X_train_seq, y_train_seq = lstm_dataset.create_sequences(X_train_scaled, y_train_scaled.values, time_steps)
+            # Use expanded test data for sequences
             X_test_seq, y_test_seq = lstm_dataset.create_sequences(X_test_scaled, y_test_scaled.values, time_steps)
             
-            # Check if sequences are empty (e.g. if fold is too small)
+            # Verify lengths
+            # Expected len = len(test_idx)
+            # if len(X_test_seq) != len(test_idx):
+            #     print(f"Warning: Test Sequence len {len(X_test_seq)} != Test Set len {len(test_idx)}")
+            
+            # Check if sequences are empty
             if len(X_train_seq) == 0 or len(X_test_seq) == 0:
                 print(f"Fold {fold}: Skipping due to insufficient data for sequence generation.")
                 continue
@@ -294,6 +409,8 @@ def main():
                 batch_size = best_params.get('batch_size', config.CNN_BATCH_SIZE)
             elif config.MODEL_TYPE == 'Transformer':
                 batch_size = best_params.get('batch_size', config.TRANSFORMER_BATCH_SIZE)
+            elif config.MODEL_TYPE == 'TFT':
+                batch_size = best_params.get('batch_size', 32)
             train_loader = lstm_dataset.prepare_dataloader(X_train_seq, y_train_seq, batch_size=batch_size)
             
             # 4b. Prepare Validation DataLoader for Early Stopping (if available)
@@ -305,14 +422,14 @@ def main():
                       f"len(X_val_orig)={len(X_val_orig) if X_val_orig is not None else 0}, "
                       f"time_steps={time_steps}, has_val={has_val}")
             if has_val:
-                # Scale val features using train-fitted scaler
-                X_val_scaled = scaler.transform(X_val_orig)
+                # Use expanded Val data
+                X_val_scaled = scaler.transform(X_val_dl)
                 
                 # Scale val targets using train stats
                 if scaling_mode == "vol_scale":
-                    y_val_scaled = y_val_orig / y_std
+                    y_val_scaled = y_val_dl / y_std
                 else:
-                    y_val_scaled = (y_val_orig - y_mean) / y_std
+                    y_val_scaled = (y_val_dl - y_mean) / y_std
                 
                 # Create sequences for val
                 X_val_seq, y_val_seq = lstm_dataset.create_sequences(X_val_scaled, y_val_scaled.values, time_steps)
@@ -346,6 +463,16 @@ def main():
                 model = CNN1DModel(input_dim, filters, kernel_size, num_layers, dropout=dropout, output_dim=1)
                 lr = best_params.get('lr', config.CNN_LEARNING_RATE)
                 epochs = config.CNN_EPOCHS
+            elif config.MODEL_TYPE == 'TFT':
+                # Apply tuned params to TFT model
+                hidden_dim = best_params.get('hidden_dim', config.TFT_HIDDEN_DIM)
+                num_heads = best_params.get('num_heads', config.TFT_NUM_HEADS)
+                num_layers = best_params.get('num_layers', config.TFT_LAYERS)
+                dropout = best_params.get('dropout', config.TFT_DROPOUT)
+                from ML.tft_model import TFTModel
+                model = TFTModel(input_dim, hidden_dim, num_heads, num_layers, dropout=dropout, output_dim=1)
+                lr = best_params.get('lr', 1e-3)
+                epochs = 50 # Default epochs for TFT
             elif config.MODEL_TYPE == 'Transformer':
                 # Apply tuned params to Transformer model
                 model_dim = best_params.get('model_dim', config.TRANSFORMER_MODEL_DIM)
@@ -579,6 +706,16 @@ def main():
             y_train_actual = y_train.values if hasattr(y_train, 'values') else y_train
             y_pred = model.predict(X_test)
             
+            # --- Capture Feature Importance (if available) ---
+            try:
+                if hasattr(model, 'feature_importances_'):
+                    all_feature_importances.append(model.feature_importances_)
+                elif hasattr(model, 'coef_'):
+                    all_feature_importances.append(model.coef_)
+                # Deep Learning models require permutation importance - skipping for speed
+            except Exception as e:
+                print(f"Could not extract feature importance: {e}")
+
             # --- Compute Validation Metrics for standard ML if val set is available ---
             y_val_pred, y_val_actual = None, None
             if has_val_set and X_val_orig is not None and len(X_val_orig) > 0:
@@ -917,34 +1054,127 @@ def main():
             title=f"Threshold-Tuned Thresholded Policy (criterion={config.WF_THRESHOLD_CRITERION})"
         )
     
-    # 4. Plot - Test Set (keep original filename for backward compatibility)
-    fig = plt.figure(figsize=(12, 6))
-    plt.plot(all_actuals, label='Actual', alpha=0.7)
-    plt.plot(all_preds, label='Predicted (Walk-Forward)', alpha=0.7)
-    plt.title(f"Walk-Forward Test Set: {config.MODEL_TYPE}")
-    plt.legend()
-    plt.grid(True)
+    # --- Feature Importance Analysis ---
+    if len(all_feature_importances) > 0:
+        try:
+            # Stack and average
+            avg_importance = np.mean(np.array(all_feature_importances), axis=0)
+            
+            # Create DataFrame
+            fi_df = pd.DataFrame({
+                'Feature': feature_cols,
+                'Importance': avg_importance
+            })
+            
+            # Sort by absolute importance
+            fi_df['AbsImportance'] = fi_df['Importance'].abs()
+            fi_df = fi_df.sort_values('AbsImportance', ascending=False).drop('AbsImportance', axis=1)
+            
+            # Save CSV
+            fi_path = os.path.join(logger.run_dir, "feature_importance.csv")
+            fi_df.to_csv(fi_path, index=False)
+            print(f"✅ Feature importance saved to: {fi_path}")
+            
+            # Plot Top 20
+            top_n = 20
+            plot_df = fi_df.head(top_n).iloc[::-1] # Reverse for barh
+            
+            fig_fi = plt.figure(figsize=(12, 10))
+            plt.barh(plot_df['Feature'], plot_df['Importance'], color='#1f77b4')
+            plt.title(f"Top {top_n} Feature Importance (Avg over {len(all_feature_importances)} folds)", fontsize=14)
+            plt.xlabel("Importance Score")
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            logger.save_plot(fig_fi, filename="feature_importance.png")
+            print(f"✅ Feature importance plot saved to: feature_importance.png")
+        except Exception as e:
+            print(f"Failed to generate feature importance plot: {e}")
+
+    # 4. Plot - Test Set (using Dates and Equity Curve)
+    
+    # Ensure we have proper dates for plotting
+    plot_dates = None
+    if len(all_test_dates) == len(all_actuals):
+        plot_dates = pd.to_datetime(all_test_dates)
+    else:
+        # Fallback to range index but try to be smart
+        print(f"Warning: Date count ({len(all_test_dates)}) != Actuals ({len(all_actuals)}). Using numeric index for X-axis.")
+        plot_dates = range(len(all_actuals))
+
+    # --- Plot 1: Returns Forecast (Original) ---
+    # Increased figsize to prevent squished look
+    fig = plt.figure(figsize=(24, 8)) 
+    plt.plot(plot_dates, all_actuals, label='Actual Return', alpha=0.5, color='gray')
+    plt.plot(plot_dates, all_preds, label='Predicted Return', alpha=0.8, color='#1f77b4')
+    plt.title(f"Walk-Forward Forecast: {config.MODEL_TYPE} (Test Set)", fontsize=14)
+    plt.ylabel("Return", fontsize=12)
+    plt.xlabel("Date", fontsize=12)
+    plt.legend(loc='upper left')
+    plt.grid(True, alpha=0.3)
     logger.save_plot(fig, filename="forecast_plot_walkforward.png")
     
     # Also save with explicit test suffix
     logger.save_plot(fig, filename="forecast_plot_walkforward_test.png")
     
-    # Plot - Train Set
+    # --- Plot 2: Cumulative Returns (Equity Curve / Price Proxy) ---
+    # This addresses "SPY Price Y axis" request
+    try:
+        # Construct equity curves
+        # Market: Buy & Hold
+        market_equity = np.cumprod(1 + all_actuals)
+        
+        # Strategy: Sign-based (Always In)
+        # Use shift(1) logic effectively: In real walk-forward, pred[t] is for return[t]. 
+        # So we trade on pred[t] to catch return[t]?
+        # Note: In standard ML setup here, y is target at t. pred is prediction of y at t.
+        # So returns are realized at t.
+        strat_returns = np.sign(all_preds) * all_actuals
+        strat_equity = np.cumprod(1 + strat_returns)
+        
+        # Big Move Strategy
+        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+        bm_signal = np.zeros_like(all_preds)
+        bm_signal[all_preds > big_move_thresh] = 1.0
+        bm_signal[all_preds < -big_move_thresh] = -1.0
+        bm_returns = bm_signal * all_actuals
+        # Fill zeros (cash) with 0 return
+        bm_equity = np.cumprod(1 + bm_returns)
+
+        fig2 = plt.figure(figsize=(24, 8))
+        plt.plot(plot_dates, market_equity, label='SPY Buy & Hold (Price Proxy)', color='black', linewidth=1.5)
+        plt.plot(plot_dates, strat_equity, label='Model L/S Strategy', color='green', linewidth=1.5)
+        plt.plot(plot_dates, bm_equity, label=f'Big Move (>{big_move_thresh:.0%})', color='purple', linewidth=1.5, linestyle='--')
+        
+        plt.title(f"Cumulative Performance (Equity Curve): {config.MODEL_TYPE}", fontsize=14)
+        plt.ylabel("Cumulative Growth ($1 start)", fontsize=12)
+        plt.xlabel("Date", fontsize=12)
+        plt.yscale('log') # Log scale often better for price
+        plt.legend(loc='upper left')
+        plt.grid(True, which="both", ls="-", alpha=0.3)
+        logger.save_plot(fig2, filename="forecast_plot_walkforward_equity.png")
+        print("✅ Saved Equity Curve plot to forecast_plot_walkforward_equity.png")
+    except Exception as e:
+        print(f"Could not plot equity curve: {e}")
+
+    
+    # Plot - Train Set (Wide)
     if len(all_train_preds) > 0 and len(all_train_actuals) > 0:
-        fig = plt.figure(figsize=(12, 6))
-        plt.plot(all_train_actuals, label='Actual', alpha=0.7)
+        fig = plt.figure(figsize=(24, 8))
+        # No dates available easily for train (as it's concatenated from folds), using index
+        plt.plot(all_train_actuals, label='Actual', alpha=0.5)
         plt.plot(all_train_preds, label='Predicted', alpha=0.7)
-        plt.title(f"Walk-Forward Train Set: {config.MODEL_TYPE}")
+        plt.title(f"Walk-Forward Train Set: {config.MODEL_TYPE}", fontsize=14)
         plt.legend()
         plt.grid(True)
         logger.save_plot(fig, filename="forecast_plot_walkforward_train.png")
     
-    # Plot - Validation Set
+    # Plot - Validation Set (Wide)
     if len(all_val_preds) > 0 and len(all_val_actuals) > 0:
-        fig = plt.figure(figsize=(12, 6))
-        plt.plot(all_val_actuals, label='Actual', alpha=0.7)
+        fig = plt.figure(figsize=(24, 8))
+        # No dates available easily for val, using index
+        plt.plot(all_val_actuals, label='Actual', alpha=0.5)
         plt.plot(all_val_preds, label='Predicted', alpha=0.7)
-        plt.title(f"Walk-Forward Validation Set: {config.MODEL_TYPE}")
+        plt.title(f"Walk-Forward Validation Set: {config.MODEL_TYPE}", fontsize=14)
         plt.legend()
         plt.grid(True)
         logger.save_plot(fig, filename="forecast_plot_walkforward_val.png")
@@ -1024,16 +1254,18 @@ def main():
     # --- PREPARE DATA FOR BOSS REPORT ---
     print("\nGenerating Boss Report...")
     
-    # 1. Reload data to ensure we have the raw daily returns
-    full_data_w_returns = data_prep.load_and_prep_data() 
+    # 1. Reload data to ensure we have the raw daily returns (Keep SPY_Price!)
+    full_data_w_returns = data_prep.load_and_prep_data(keep_price=True) 
     
     # 2. Ensure 'Return_1D' exists (Calculated from Price if missing)
     if 'Return_1D' not in full_data_w_returns.columns:
         if 'Adj Close' in full_data_w_returns.columns:
             full_data_w_returns['Return_1D'] = full_data_w_returns['Adj Close'].pct_change()
+        elif 'SPY_Price' in full_data_w_returns.columns:
+            print("Note: Using 'SPY_Price' to calculate daily returns.")
+            full_data_w_returns['Return_1D'] = full_data_w_returns['SPY_Price'].pct_change()
         else:
-            print("Warning: 'Adj Close' not found. Approximating daily returns from target.")
-            full_data_w_returns['Return_1D'] = full_data_w_returns[config.TARGET_COL] / 21.0 
+            raise ValueError("CRITICAL: Price data (SPY_Price) not found for report generation. Cannot calculate accurate daily returns. Aborting report to prevent misleading 'smoothed' metrics.") 
 
     # 3. Align dates and returns
     test_dates = pd.DatetimeIndex(all_test_dates) 
@@ -1055,17 +1287,129 @@ def main():
     if 'RV_Ratio' in full_data_w_returns.columns:
         feature_data = full_data_w_returns[['RV_Ratio']].loc[test_dates]
     
+    
+    # Dynamic Model Description Helper
+    def get_model_description(model_type, params):
+        if 'Regime' in model_type:
+            return (
+                f"Model Type: {model_type}\n"
+                "Mechanism: 'Regime Gated' architecture designed to adapt to changing market conditions.\n"
+                "  - The model monitors market volatility (Realized Volatility Ratio).\n"
+                "  - In Low Volatility regimes, it uses a specific sub-model (e.g., Ridge) optimized for steady trends.\n"
+                "  - In High Volatility regimes, it switches to a different sub-model (e.g., RandomForest) dealing with non-linear stress.\n"
+                f"Structure: {params if params else 'Default Configuration'}"
+            )
+        elif 'TFT' in model_type:
+            return (
+                f"Model Type: {model_type} (Temporal Fusion Transformer)\n"
+                "Mechanism: Advanced Deep Learning architecture for time-series forecasting.\n"
+                "  - Gating Mechanisms: Learns to suppress unnecessary features (Variable Selection Network).\n"
+                "  - LSTM Layers: Captures local time dependencies and sequence patterns.\n"
+                "  - Temporal Attention: Identifies long-range patterns and crucial past events.\n"
+                "  - Interpretability: Provides built-in feature importance and attention weights.\n"
+                f"Structure: {params if params else 'Hidden=64, Heads=4, Layers=2 (Default)'}"
+            )
+        elif 'LSTM' in model_type:
+            return (
+                f"Model Type: {model_type} (Long Short-Term Memory)\n"
+                "Mechanism: Recurrent Neural Network (RNN) designed to learn sequence dependencies.\n"
+                "  - Memory Cells: Can retain information over long periods, unlike standard feed-forward networks.\n"
+                "  - Non-Linearity: Capable of modeling complex, non-linear market dynamics.\n"
+                f"Structure: {params if params else 'Hidden=64, Layers=2 (Default)'}"
+            )
+        elif 'Ridge' in model_type or 'Linear' in model_type:
+            return (
+                f"Model Type: {model_type} (Regularized Linear Regression)\n"
+                "Mechanism: Linear approach that balances fit with complexity (L2 Regularization).\n"
+                "  - Pros: Highly robust to noise, less prone to overfitting than complex models.\n"
+                "  - Cons: Cannot model non-linear relationships.\n"
+                f"Structure: Alpha={params.get('alpha', 'Auto') if params else 'Auto'}"
+            )
+        elif 'Forest' in model_type or 'Tree' in model_type:
+             return (
+                f"Model Type: {model_type}\n"
+                "Mechanism: Ensemble of decision trees.\n"
+                "  - Non-Linear: Can model complex interactions between features.\n"
+                "  - Robustness: Averaging many trees reduces variance compared to a single tree.\n"
+                f"Structure: {params if params else 'Default Sklearn Config'}"
+            )
+        else:
+            return (
+                f"Model Type: {model_type}\n"
+                "Mechanism: Machine Learning Regressor.\n"
+                "  - Goal: Predict future returns based on historical patterns.\n"
+                f"Structure: {params if params else 'Standard Configuration'}"
+            )
+
+    model_desc_text = get_model_description(config.MODEL_TYPE, best_params)
+
+    # Define Report Context (Overview, Model, Validation, Strategy)
+    report_context = {
+        "1. Executive Summary": (
+            f"Analysis of {config.MODEL_TYPE} model predicting S&P 500 {config.TARGET_HORIZON_DAYS}-day returns.\n"
+            "This report evaluates the model's ability to forecast forward returns and the performance of trading strategies derived from those predictions."
+        ),
+        "2. Model Architecture": (
+            model_desc_text + "\n" +
+            f"Input Features: {len(feature_cols)} features selected for predictive power, including technicals, macro indicators, and sentiment."
+        ),
+        "3. Validation Methodology": (
+            "Technique: Strict Walk-Forward Validation (No Look-Ahead).\n"
+            "Why: To simulate real-world trading exactly as it would have happened.\n"
+            "Process:\n"
+            f"  1. Rolling Train Window: The model is trained on the past {config.TRAIN_WINDOW_YEARS} years of data.\n"
+            f"  2. Safety Embargo: A {config.EMBARGO_ROWS}-day gap is enforced between training and testing to prevent 'target leakage' (ensure we don't trade on data that wasn't public yet).\n"
+            f"  3. Out-of-Sample Test: The model predicts the NEXT month of unseen data.\n"
+            f"  4. Step Forward: The window rolls forward 1 month, and the process repeats ({total_folds} times).\n"
+            "Result: A composite track record of predictions made only on 'future' data."
+        ),
+        "4. Strategy Definitions": (
+            "A) Long/Short (Daily Overlap): \n"
+            "   - Concept: Enters a small portion (1/21) of the position every day based on the latest signal.\n"
+            "   - Effect: Smooths out timing luck. Effectively holds the average opinion of the model over the last month.\n"
+            "   - Result: Lower volatility, higher Sharpe potential due to time-diversification.\n\n"
+            "B) Long Only: \n"
+            "   - Concept: Same smoothing as above, but never shorts. If the model is bearish, it goes to Cash (0).\n\n"
+            "C) Vol Target 15%: \n"
+            "   - Concept: Institutional-style risk parity. \n"
+            "   - Logic: When market vol is low (10%), we lever up (1.5x) to target 15%. When market vol is high (30%), we size down (0.5x).\n"
+            "   - Goal: Stable returns regardless of market environment.\n\n"
+            "D) Big Move Sniper: \n"
+            "   - Concept: Only trades when the model predicts a massive move (>3%). Binary bet (All-in or Cash)."
+        ),
+        "5. Metrics Glossary": (
+            "Sharpe Ratio: Excess Return / Volatility. Measures return per unit of risk. >1.0 is Good, >2.0 is Exceptional.\n"
+            "Sortino Ratio: Like Sharpe, but ignores 'good' volatility (upside). Only penalizes downside risk.\n"
+            "CAGR: Compound Annual Growth Rate (Geometric). The actual annual growth rate of your capital.\n"
+            "Max Drawdown: Deepest peak-to-trough decline. A measure of 'pain'."
+        )
+    }
+
     engine = BacktestEngine(
-        predictions=all_preds,
-        dates=test_dates,
-        daily_returns=aligned_daily_rets,
-        target_horizon=21,
-        feature_data=feature_data
+        predictions=all_preds, 
+        dates=test_dates, 
+        daily_returns=aligned_daily_rets, 
+        target_horizon=config.TARGET_HORIZON_DAYS,
+        feature_data=feature_data,
+        report_context=report_context
     )
     
-    # Generate comprehensive boss report and save to Excel/CSV
-    boss_report_path = os.path.join(logger.run_dir, "boss_report")
+    # Generate comprehensive boss report (Excel)
+    boss_report_path = os.path.join(logger.run_dir, "boss_report.xlsx")
     boss_sheets = engine.generate_boss_report_excel(save_path=boss_report_path)
+    
+    boss_report_path = os.path.join(logger.run_dir, "boss_report.xlsx")
+    boss_sheets = engine.generate_boss_report_excel(save_path=boss_report_path)
+    
+    # Generate Plots
+    engine.generate_plots(logger.run_dir)
+    
+    # Generate comprehensive boss report (Markdown with Explanations)
+    boss_md = engine.generate_boss_report_md()
+    boss_md_path = os.path.join(logger.run_dir, "boss_report.md")
+    with open(boss_md_path, 'w', encoding='utf-8') as f:
+        f.write(boss_md)
+    print(f"✅ Boss Report Markdown (with explanations) saved to: {boss_md_path}")
     
     # Print summary to console
     print("\n" + "="*80)
@@ -1080,7 +1424,8 @@ def main():
     summary_path = os.path.join(logger.run_dir, "summary.md")
     with open(summary_path, 'a', encoding='utf-8') as f:
         f.write("\n## 💼 Boss Report\n")
-        f.write("> Comprehensive trading strategy analysis saved to `boss_report.xlsx` and `boss_report.csv`\n")
+        f.write("> **Detailed Strategy Report**: [View Boss Report (with Explanations)](boss_report.md)\n")
+        f.write("> Comprehensive trading strategy analysis also saved to `boss_report.xlsx`\n")
         f.write("> \n")
         f.write("> **Excel File Includes:**\n")
         f.write("> - Summary: Core performance metrics for all strategies\n")

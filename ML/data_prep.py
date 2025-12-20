@@ -31,10 +31,13 @@ def get_big_move_threshold():
     """Get the big move threshold from config, defaulting to 3%."""
     return getattr(config, "BIG_MOVE_THRESHOLD", 0.03)
 
-def load_and_prep_data():
+def load_and_prep_data(keep_price=False):
     """
     Loads data, creates target, and handles basic cleaning.
     
+    Args:
+        keep_price (bool): If True, retains SPY_Price column (useful for reporting).
+        
     Returns:
         pd.DataFrame: Data with features and target.
     """
@@ -53,9 +56,10 @@ def load_and_prep_data():
     else:
         raise ValueError("Cannot create target. Missing SPY_Price or Return_1M.")
 
-    # Drop SPY_Price from features to avoid leakage/non-stationarity
-    if 'SPY_Price' in df.columns:
-        df.drop(columns=['SPY_Price'], inplace=True)
+    # Drop SPY_Price from features unless requested to keep (e.g. for reporting)
+    if not keep_price:
+        if 'SPY_Price' in df.columns:
+            df.drop(columns=['SPY_Price'], inplace=True)
     
     # Drop Log_Target_1M - this is a transformed version of the target (LEAKAGE!)
     if 'Log_Target_1M' in df.columns:

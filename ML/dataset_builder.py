@@ -45,6 +45,12 @@ def build_daily_features(data_path=None):
     
     # Drop columns that are entirely NaN
     df.dropna(axis=1, how='all', inplace=True)
+
+    # Remove redundant MA_Dist_200 if present (duplicate of Dist_from_200MA)
+    if 'MA_Dist_200' in df.columns:
+        print("[DatasetBuilder] Dropping redundant 'MA_Dist_200' (duplicate of 'Dist_from_200MA')")
+        df.drop(columns=['MA_Dist_200'], inplace=True)
+
     
     # Only forward-fill explicitly listed macro columns (no backward-fill!)
     macro_ffill_cols = getattr(config, "MACRO_FFILL_COLS", [])

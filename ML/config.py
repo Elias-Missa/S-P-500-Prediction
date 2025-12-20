@@ -143,16 +143,23 @@ CNN_LEARNING_RATE = 0.001
 TRANSFORMER_TIME_STEPS = 3  # 3 months lookback for monthly frequency
 TRANSFORMER_LOOKBACK_CANDIDATES = [10, 20, 30, 45, 60]  # Optuna search space
 TRANSFORMER_MODEL_DIM = 32
-TRANSFORMER_FEEDFORWARD_DIM = 64
+TRANSFORMER_FEEDFORWARD_DIM = 128
 TRANSFORMER_LAYERS = 2
 TRANSFORMER_HEADS = 4
-TRANSFORMER_DROPOUT = 0.25
+TRANSFORMER_DROPOUT = 0.1
 TRANSFORMER_EPOCHS = 50
 TRANSFORMER_BATCH_SIZE = 32
 TRANSFORMER_LR = 1e-4           # Conservative LR for overnight stability
 TRANSFORMER_WEIGHT_DECAY = 1e-2
 
-# Optuna Tuning
+# TFT Model Settings
+TFT_HIDDEN_DIM = 64
+TFT_NUM_HEADS = 4
+TFT_LAYERS = 2
+TFT_DROPOUT = 0.1
+
+# -----------------------------------------------------------------------------
+# Tuning Configuration (Optuna)
 USE_OPTUNA = False
 OPTUNA_TRIALS = 20
 
@@ -233,3 +240,9 @@ MACRO_FFILL_COLS = [
     "Yield_Curve",       # T10Y2Y spread (daily, ffill for weekends/holidays)
     "Put_Call_Ratio",    # Put/Call ratio (daily, ffill for missing days)
 ]
+
+# ===============================
+# Hyperparameter Tuning
+# ===============================
+USE_OPTUNA = False
+OPTUNA_TRIALS = 20

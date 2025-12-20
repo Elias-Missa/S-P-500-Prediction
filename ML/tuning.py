@@ -140,6 +140,12 @@ class HyperparameterTuner:
             study.optimize(self._objective_cnn, n_trials=n_trials)
         elif self.model_type == 'Transformer':
             study.optimize(self._objective_transformer, n_trials=n_trials)
+        elif self.model_type == 'Ridge':
+            study.optimize(self._objective_ridge, n_trials=n_trials)  # Enabled
+        elif self.model_type == 'RegimeGatedRidge':
+            study.optimize(self._objective_regime_gated_ridge, n_trials=n_trials)
+        elif self.model_type == 'RegimeGatedHybrid':
+            study.optimize(self._objective_regime_gated_hybrid, n_trials=n_trials)
         else:
             print(f"Optuna not implemented for {self.model_type}. Skipping.")
             return {}
@@ -557,4 +563,102 @@ class HyperparameterTuner:
         # Combined objective: penalize MSE, reward big-move F1
         # Optuna minimizes, so subtract F1 terms
         objective = mean_mse - 0.5 * (mean_big_f1_up + mean_big_f1_down)
+        return objective
+        return objective
+
+    def _objective_ridge(self, trial):
+        from sklearn.linear_model import Ridge
+        
+        # Ridge only has limited tuning params
+        alpha = trial.suggest_float('alpha', 0.1, 1000.0, log=True)
+        
+        model = Ridge(alpha=alpha, random_state=42)
+        model.fit(self.X_train, self.y_train)
+        y_pred = model.predict(self.X_val)
+        
+        # Compute MSE
+        mse = mean_squared_error(self.y_val, y_pred)
+        
+        # Compute big-move F1 scores
+        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+        tail = calculate_tail_metrics(self.y_val.values, y_pred, threshold=big_move_thresh)
+        big_f1_up = _f1_score(tail["precision_up_strict"], tail["recall_up_strict"])
+        big_f1_down = _f1_score(tail["precision_down_strict"], tail["recall_down_strict"])
+        
+        # Combined objective: penalize MSE, reward big-move F1
+        objective = mse - 0.5 * (big_f1_up + big_f1_down)
+        return objective
+
+    def _objective_regime_gated_ridge(self, trial):
+        from .models import RegimeGatedRidge
+        
+        # Search space for alpha
+        alpha = trial.suggest_float('alpha', 0.1, 1000.0, log=True)
+        
+        # We assume RV_Ratio is present in features. If it was dropped, this might fail, 
+        # but data_prep ensures it's kept if features are loaded correctly.
+        model = RegimeGatedRidge(alpha=alpha, regime_col='RV_Ratio')
+        
+        try:
+            model.fit(self.X_train, self.y_train)
+            y_pred = model.predict(self.X_val)
+        except ValueError as e:
+            # Handle case where regime col is missing
+            print(f"Trial failed: {e}")
+            return float('inf')
+        
+        # Compute MSE
+        mse = mean_squared_error(self.y_val, y_pred)
+        
+        # Compute big-move F1 scores
+        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+        tail = calculate_tail_metrics(self.y_val.values, y_pred, threshold=big_move_thresh)
+        big_f1_up = _f1_score(tail["precision_up_strict"], tail["recall_up_strict"])
+        big_f1_down = _f1_score(tail["precision_down_strict"], tail["recall_down_strict"])
+        
+        # Combined objective: penalize MSE, reward big-move F1
+        objective = mse - 0.5 * (big_f1_up + big_f1_down)
+        return objective
+
+    def _objective_regime_gated_hybrid(self, trial):
+        from .models import RegimeGatedHybrid
+        from sklearn.linear_model import Ridge
+        from sklearn.ensemble import RandomForestRegressor
+        
+        # Search space
+        # Low Vol Regime (Ridge)
+        ridge_alpha = trial.suggest_float('alpha', 0.1, 1000.0, log=True)
+        
+        # High Vol Regime (RandomForest)
+        rf_n_estimators = trial.suggest_int('n_estimators', 50, 200)
+        rf_max_depth = trial.suggest_int('max_depth', 3, 10)
+        
+        # Initialize Hybrid with default strings so logic works
+        model = RegimeGatedHybrid(regime_col='RV_Ratio')
+        
+        # Manually overwrite sub-models to avoid kwargs collision
+        model.low_vol_model = Ridge(alpha=ridge_alpha, random_state=42)
+        model.high_vol_model = RandomForestRegressor(
+            n_estimators=rf_n_estimators, max_depth=rf_max_depth, random_state=42, n_jobs=-1
+        )
+        
+        try:
+            model.fit(self.X_train, self.y_train)
+            y_pred = model.predict(self.X_val)
+        except ValueError as e:
+            # Handle case where regime col is missing
+            print(f"Trial failed: {e}")
+            return float('inf')
+        
+        # Compute MSE
+        mse = mean_squared_error(self.y_val, y_pred)
+        
+        # Compute big-move F1 scores
+        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
+        tail = calculate_tail_metrics(self.y_val.values, y_pred, threshold=big_move_thresh)
+        big_f1_up = _f1_score(tail["precision_up_strict"], tail["recall_up_strict"])
+        big_f1_down = _f1_score(tail["precision_down_strict"], tail["recall_down_strict"])
+        
+        # Combined objective: penalize MSE, reward big-move F1
+        objective = mse - 0.5 * (big_f1_up + big_f1_down)
         return objective

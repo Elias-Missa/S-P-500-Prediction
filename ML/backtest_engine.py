@@ -3,12 +3,13 @@ import numpy as np
 from . import financial_metrics
 
 class BacktestEngine:
-    def __init__(self, predictions, dates, daily_returns, target_horizon=21, feature_data=None):
+    def __init__(self, predictions, dates, daily_returns, target_horizon=21, feature_data=None, report_context=None):
         """
         predictions: Model scores
         dates: DateTime index
         daily_returns: Actual daily returns of SPY (aligned with dates)
         feature_data: Optional DataFrame with features (for regime analysis)
+        report_context: Optional text/dict with context (Model description, Validation details)
         """
         # Align dataframes
         self.df = pd.DataFrame({
@@ -17,6 +18,7 @@ class BacktestEngine:
         }, index=dates).dropna()
         self.target_horizon = target_horizon
         self.feature_data = feature_data
+        self.report_context = report_context or {}
 
     def run_scenario(self, mode='daily', strategy='long_short', cost_bps=5.0):
         """
@@ -29,7 +31,7 @@ class BacktestEngine:
         if strategy == 'long_short':
             signal = np.sign(preds)
         elif strategy == 'long_only':
-            signal = np.where(preds > 0, 1.0, 0.0)
+            signal = pd.Series(np.where(preds > 0, 1.0, 0.0), index=preds.index)
         elif strategy == 'big_move':
             # Dynamic threshold or fixed
             thresh = 0.03 
@@ -37,6 +39,34 @@ class BacktestEngine:
             signal[preds > thresh] = 1.0
             signal[preds < -thresh] = -1.0
             signal = pd.Series(signal, index=preds.index)
+        elif strategy == 'vol_targeting':
+            # Volatility Targeting Strategy
+            target_vol = 0.15  # 15% annualized vol target
+            
+            if self.feature_data is not None and 'GARCH_Forecast' in self.feature_data.columns:
+                # Use GARCH forecast if available (annualized)
+                # GARCH is usually variance, so sqrt it
+                vol_est = np.sqrt(self.feature_data.loc[preds.index, 'GARCH_Forecast'])
+            else:
+                # Fallback: 21-day rolling vol
+                vol_est = self.df['market_ret'].rolling(21).std() * np.sqrt(252)
+            
+            # Avoid division by zero
+            vol_est = vol_est.replace(0, np.nan).ffill().fillna(0.15)
+            
+            # Size = Target / Estimate
+            # Cap leverage at 2.0x to be realistic
+            leverage = (target_vol / vol_est).clip(0, 2.0)
+            
+            # Direction from model prediction
+            direction = np.sign(preds)
+            
+            # Ensure leverage is aligned (if vol_est came from rolling, it has index)
+            if hasattr(leverage, 'values'):
+                leverage = leverage.values
+            
+            signal = pd.Series(direction * leverage, index=preds.index)
+
         
         # 2. Execution Logic
         if mode == 'monthly':
@@ -47,7 +77,6 @@ class BacktestEngine:
             active_signal = sig_monthly.reindex(signal.index).ffill()
         else:
             # Daily Overlapping: Average of last N signals
-            # This mimics entering 1/21th of the position every day
             active_signal = signal.rolling(self.target_horizon).mean()
             
         # Shift 1 day (Trade next open) to prevent lookahead
@@ -68,8 +97,10 @@ class BacktestEngine:
             ("L/S (Daily Overlap)", 'daily', 'long_short'),
             ("Long Only (Daily)", 'daily', 'long_only'),
             ("L/S (Monthly Rebal)", 'monthly', 'long_short'),
-            ("Big Move (Daily)", 'daily', 'big_move')
+            ("Big Move (Daily)", 'daily', 'big_move'),
+            ("Vol Target 15% (Daily)", 'daily', 'vol_targeting')
         ]
+
         
         # Run Benchmark (Buy & Hold)
         bench_ret = self.df['market_ret']
@@ -103,7 +134,44 @@ class BacktestEngine:
         
         # Construct Markdown
         md = "\n## 💼 Boss Report: Trading Strategy Analysis\n"
-        md += "> Simulation includes 5bps transaction costs per turnover.\n\n"
+        
+        # --- Strategy Explanations ---
+        md += "### 📘 Strategy Definitions\n"
+        md += "To ensure full visibility on how these backtests operate, here are the detailed mechanics of each strategy:\n\n"
+        
+        md += "**1. L/S (Daily Overlap)**\n"
+        md += "- **Concept**: Tells us how the model performs if we trade every single day based on the latest prediction.\n"
+        md += "- **Mechanics**: Instead of putting 100% of capital into one trade, we enter 1/21th of the position each day. This smooths out volatility and noise. It effectively averages the signals over the last 21 days.\n"
+        md += "- **Position**: Can be Long (+1), Short (-1), or Neutral. Net position fluctuates smoothly.\n\n"
+        
+        md += "**2. Long Only (Daily)**\n"
+        md += "- **Concept**: Traditional 'Long Only' equity fund logic. No shorting allowed.\n"
+        md += "- **Mechanics**: If the model predicts UP, we buy. If the model predicts DOWN, we go to Cash (0 position). Uses the same 'Daily Overlap' smoothing as above.\n"
+        md += "- **Position**: Long (+1) or Cash (0).\n\n"
+        
+        md += "**3. L/S (Monthly Rebal)**\n"
+        md += "- **Concept**: Standard monthly hedge fund rebalancing.\n"
+        md += "- **Mechanics**: We look at the model's signal only once every 21 days. We ignore all daily fluctuations in between. We enter a trade and hold it 'locked' for the full month.\n"
+        md += "- **Pros/Cons**: Lower transaction costs, but reacts slower to sudden market changes.\n\n"
+        
+        md += "**4. Big Move (Daily)**\n"
+        md += "- **Concept**: 'Sniper' strategy. Only trade when the model is extremely confident.\n"
+        md += "- **Mechanics**: We set a high threshold (e.g., 3%). If prediction > 3%, go 100% Long. If prediction < -3%, go 100% Short. Otherwise, sit in Cash.\n"
+        md += "- **Position**: Binary bets: +1, -1, or 0.\n\n"
+
+        md += "**5. Vol Target 15% (Daily)**\n"
+        md += "- **Concept**: Risk parity approach. Trade larger when market is calm, smaller when volatile.\n"
+        md += "- **Mechanics**: We target 15% annualized volatility. Leverage = 15% / Current Vol. Direction follows model.\n"
+        md += "- **Position**: Variable leverage (Capped at 2x). E.g., if Vol is 30% -> 0.5x position. If Vol is 10% -> 1.5x position.\n\n"
+
+
+        md += "**5. Vol Target 15% (Daily)**\n"
+        md += "- **Concept**: Risk parity approach. Trade larger when market is calm, smaller when volatile.\n"
+        md += "- **Mechanics**: We target 15% annualized volatility. Leverage = 15% / Current Vol. Direction follows model.\n"
+        md += "- **Position**: Variable leverage (Capped at 2x). E.g., if Vol is 30% -> 0.5x position. If Vol is 10% -> 1.5x position.\n\n"
+
+        
+        md += "> **Note**: Simulation includes 5bps transaction costs per turnover (slippage + comms).\n\n"
         
         # --- Table 1 ---
         md += "### 📈 Returns & Risk Metrics\n"
@@ -148,6 +216,51 @@ class BacktestEngine:
         threshold = aligned_rv.median()
         return (aligned_rv > threshold).map({True: 'High Vol', False: 'Low Vol'})
 
+    def generate_plots(self, output_dir):
+        """Generates and saves additional plots/visuals."""
+        import os
+        import matplotlib.pyplot as plt
+        
+        # Re-run scenarios to get returns
+        scenarios = [
+            ("L/S (Daily Overlap)", 'daily', 'long_short'),
+            ("Long Only (Daily)", 'daily', 'long_only'),
+            ("L/S (Monthly Rebal)", 'monthly', 'long_short'),
+            ("Big Move (Daily)", 'daily', 'big_move'),
+            ("Vol Target 15% (Daily)", 'daily', 'vol_targeting')
+        ]
+        
+        strategy_returns = {
+            "SPY Buy & Hold": self.df['market_ret']
+        }
+        for name, mode, strat in scenarios:
+            try:
+                strategy_returns[name] = self.run_scenario(mode, strat)
+            except:
+                pass
+                
+        # 1. Underwater Plot
+        try:
+            fig_uw = self.plot_underwater(strategy_returns)
+            fig_uw.savefig(os.path.join(output_dir, "plot_underwater.png"))
+            plt.close(fig_uw)
+        except Exception as e:
+            print(f"Failed to save underwater plot: {e}")
+
+        # 2. Heatmap (for best strategy or just L/S)
+        try:
+            # Generate for Vol Target or L/S
+            target_strat = "Vol Target 15% (Daily)"
+            if target_strat not in strategy_returns:
+                target_strat = "L/S (Daily Overlap)"
+            
+            if target_strat in strategy_returns:
+                fig_hm = self.plot_monthly_heatmap(strategy_returns[target_strat])
+                fig_hm.savefig(os.path.join(output_dir, "plot_monthly_heatmap.png"))
+                plt.close(fig_hm)
+        except Exception as e:
+            print(f"Failed to save heatmap: {e}")
+
     def generate_boss_report_excel(self, save_path):
         """
         Generates comprehensive boss report with multiple sheets:
@@ -163,8 +276,10 @@ class BacktestEngine:
             ("L/S (Daily Overlap)", 'daily', 'long_short'),
             ("Long Only (Daily)", 'daily', 'long_only'),
             ("L/S (Monthly Rebal)", 'monthly', 'long_short'),
-            ("Big Move (Daily)", 'daily', 'big_move')
+            ("Big Move (Daily)", 'daily', 'big_move'),
+            ("Vol Target 15% (Daily)", 'daily', 'vol_targeting')
         ]
+
         
         # Run Benchmark (Buy & Hold)
         bench_ret = self.df['market_ret']
@@ -184,6 +299,20 @@ class BacktestEngine:
         # Generate all sheets
         sheets = {}
         
+        # Sheet 0: Context / Read Me (The User Requested Overview)
+        context_rows = []
+        if self.report_context:
+            for section, text in self.report_context.items():
+                context_rows.append({"Section": section, "Details": text})
+        
+        # Add standard strategy definitions if not present
+        if not any("Strategy" in str(k) for k in self.report_context.keys()):
+             context_rows.append({"Section": "Strategy: L/S (Daily)", "Details": "Trades every day based on latest prediction (1/21 position size per day). Smooths volatility."})
+             context_rows.append({"Section": "Strategy: Vol Target 15%", "Details": "Adjusts leverage dynamically to maintain 15% annualized volatility. Sizes down in high vol."})
+        
+        if context_rows:
+            sheets['Report Context'] = pd.DataFrame(context_rows)
+
         # Sheet 1: Summary
         summary_data = []
         for name, rets in strategy_returns.items():
@@ -197,7 +326,7 @@ class BacktestEngine:
         monthly_data = []
         for name, rets in strategy_returns.items():
             rets_series = pd.Series(rets, index=self.df.index)
-            monthly_rets = rets_series.resample('M').apply(lambda x: np.prod(1 + x) - 1)
+            monthly_rets = rets_series.resample('ME').apply(lambda x: np.prod(1 + x) - 1)
             for date, ret in monthly_rets.items():
                 monthly_data.append({
                     "Strategy": name,
@@ -212,7 +341,7 @@ class BacktestEngine:
         quarterly_data = []
         for name, rets in strategy_returns.items():
             rets_series = pd.Series(rets, index=self.df.index)
-            quarterly_rets = rets_series.resample('Q').apply(lambda x: np.prod(1 + x) - 1)
+            quarterly_rets = rets_series.resample('QE').apply(lambda x: np.prod(1 + x) - 1)
             for date, ret in quarterly_rets.items():
                 quarter_num = (date.month-1)//3 + 1
                 quarterly_data.append({
@@ -287,13 +416,25 @@ class BacktestEngine:
                     })
         sheets['Regime Analysis'] = pd.DataFrame(regime_data)
         
-        # Sheet 6: Trade Analysis
+        # Sheet 6: Trade Analysis (Strategy Level Stats) & Trade Log (Detailed)
         trade_data = []
+        all_trades_log = []
+        
         for name, rets in strategy_returns.items():
             rets_series = pd.Series(rets, index=self.df.index)
             
             # Identify trades (position changes)
+            # This logic assumes daily rebalancing or effective position changes
+            # For accurate trade logging, we need to reconstruct the position
+            # This is an approximation based on returns != 0 for 'In Trade'
+            # A better way for L/S strategies is to track sign changes
+            
             positions = (rets_series != 0).astype(int)
+            # For L/S, we want to track direction. 
+            # If returns are + and market is +, we are Long. 
+            # But simpler: use the predictions if available or infer from return correlation?
+            # Since we only have 'rets' here, we infer 'Active' status.
+            
             position_changes = positions.diff().abs()
             trade_starts = position_changes[position_changes > 0].index
             
@@ -308,12 +449,31 @@ class BacktestEngine:
                 trade_return = np.prod(1 + trade_rets) - 1
                 holding_days = len(trade_rets)
                 
-                trades.append({
-                    "Start Date": start_date,
-                    "End Date": end_date,
+                # Heuristic for Direction: Correlation with Market
+                market_period = bench_ret.loc[start_date:end_date]
+                if len(market_period) > 1 and len(trade_rets) > 1:
+                    # Sanitize
+                    trade_rets_clean = np.nan_to_num(trade_rets, nan=0.0)
+                    market_clean = np.nan_to_num(market_period, nan=0.0)
+                    
+                    if np.var(trade_rets_clean) > 1e-8 and np.var(market_clean) > 1e-8:
+                        corr = np.corrcoef(trade_rets_clean, market_clean)[0, 1]
+                        direction = "Long" if corr > 0 else "Short"
+                    else:
+                        direction = "Neutral"
+                else:
+                    direction = "Unknown"
+
+                trade_entry = {
+                    "Strategy": name,
+                    "Entry Date": start_date,
+                    "Exit Date": end_date,
+                    "Direction": direction,
                     "Return": trade_return,
                     "Holding Days": holding_days
-                })
+                }
+                trades.append(trade_entry)
+                all_trades_log.append(trade_entry)
             
             if trades:
                 trades_df = pd.DataFrame(trades)
@@ -325,9 +485,9 @@ class BacktestEngine:
                     "Strategy": name,
                     "Total Trades": len(trades),
                     "Largest Win": largest_win['Return'],
-                    "Largest Win Start": largest_win['Start Date'],
+                    "Largest Win Start": largest_win['Entry Date'],
                     "Largest Loss": largest_loss['Return'],
-                    "Largest Loss Start": largest_loss['Start Date'],
+                    "Largest Loss Start": largest_loss['Entry Date'],
                     "Avg Holding Days": avg_holding,
                     "Median Holding Days": trades_df['Holding Days'].median(),
                 })
@@ -342,7 +502,9 @@ class BacktestEngine:
                     "Avg Holding Days": None,
                     "Median Holding Days": None,
                 })
+        
         sheets['Trade Analysis'] = pd.DataFrame(trade_data)
+        sheets['Trade Log'] = pd.DataFrame(all_trades_log) # New Sheet
         
         # Sheet 7: Period Sharpe
         period_sharpe_data = []
@@ -367,7 +529,7 @@ class BacktestEngine:
                     })
             
             # Quarterly Sharpe
-            quarterly_rets = rets_series.resample('Q').apply(lambda x: np.prod(1 + x) - 1)
+            quarterly_rets = rets_series.resample('QE').apply(lambda x: np.prod(1 + x) - 1)
             for date, q_ret in quarterly_rets.items():
                 q_daily_rets = rets_series[rets_series.index.to_period('Q') == date.to_period('Q')]
                 if len(q_daily_rets) > 0:
@@ -385,6 +547,164 @@ class BacktestEngine:
                     })
         
         sheets['Period Sharpe'] = pd.DataFrame(period_sharpe_data)
+        
+        # Sheet 8: Configuration (New)
+        from . import config
+        config_data = [
+            {"Parameter": "Generated Date", "Value": str(pd.Timestamp.now())},
+            {"Parameter": "Model Type", "Value": getattr(config, 'MODEL_TYPE', 'Unknown')},
+            {"Parameter": "Frequency", "Value": getattr(config, 'DATA_FREQUENCY', 'daily')},
+            {"Parameter": "Target Mode", "Value": getattr(config, 'TARGET_MODE', 'Unknown')},
+            {"Parameter": "Transaction Cost (bps)", "Value": 5},
+            {"Parameter": "Big Move Threshold", "Value": getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)},
+        ]
+        sheets['Configuration'] = pd.DataFrame(config_data)
+
+        # Generate Plots (Logic kept simpler here, returning dict of plot objects or saving internally?)
+        # For this engine, we rely on the caller to handle plots typically, 
+        # but let's add helper methods for the new requested visuals.
+        
+        # Save to Excel with Formatting
+        try:
+            # Try using xlsxwriter for advanced formatting
+            with pd.ExcelWriter(save_path, engine='xlsxwriter') as writer:
+                # Write each sheet
+                for sheet_name, df in sheets.items():
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    
+                    # Apply formatting
+                    workbook = writer.book
+                    worksheet = writer.sheets[sheet_name]
+                    
+                    # Define formats
+                    wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'top'})
+                    header_format = workbook.add_format({'bold': True, 'bg_color': '#D3D3D3', 'border': 1})
+                    
+                    # Apply header format
+                    for col_num, value in enumerate(df.columns.values):
+                        worksheet.write(0, col_num, value, header_format)
+                    
+                    # Special formatting for "Report Context"
+                    if sheet_name == 'Report Context':
+                        worksheet.set_column('A:A', 25, wrap_format)
+                        worksheet.set_column('B:B', 100, wrap_format)
+                    else:
+                        # Auto-adjust column widths
+                        for i, col in enumerate(df.columns):
+                            try:
+                                column_len = max(df[col].astype(str).map(len).max(), len(col)) + 2
+                            except:
+                                column_len = 15
+                            column_len = min(column_len, 50)
+                            worksheet.set_column(i, i, column_len)
+                            
+            print(f"Boss report saved to: {save_path}")
+            
+        except ImportError:
+            print("Note: 'xlsxwriter' not found. Using 'openpyxl' (standard) for Excel generation.")
+            # Fallback to standard save with openpyxl formatting
+            try:
+                with pd.ExcelWriter(save_path, engine='openpyxl') as writer:
+                    for sheet_name, df in sheets.items():
+                        df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    
+                    # Basic OpenPyXL Formatting
+                    from openpyxl.utils import get_column_letter
+                    for sheet_name in writer.sheets:
+                        worksheet = writer.sheets[sheet_name]
+                        if sheets[sheet_name].empty: continue
+                        
+                        for idx, col in enumerate(sheets[sheet_name].columns):
+                            series = sheets[sheet_name][col]
+                            try:
+                                max_len = max((series.astype(str).map(len).max(), len(str(series.name)))) + 2
+                            except:
+                                max_len = 15
+                            max_len = min(max_len, 50)
+                            col_letter = get_column_letter(idx + 1)
+                            worksheet.column_dimensions[col_letter].width = max_len
+                            
+                print(f"Saved report (standard formatting) to: {save_path}")
+                
+            except Exception as e2:
+                print(f"Critical error saving report: {e2}")
+
+        except Exception as e:
+            print(f"Error saving Excel report (xlsxwriter): {e}") 
+            # Fallback for generic errors
+            try:
+                with pd.ExcelWriter(save_path) as writer:
+                    for sheet_name, df in sheets.items():
+                        df.to_excel(writer, sheet_name=sheet_name, index=False)
+                print(f"Saved unformatted report to: {save_path}")
+            except Exception as e3:
+                 print(f"Critical error saving report: {e3}")
+        
+        return sheets
+
+    def plot_underwater(self, returns_dict):
+        """Generates an Underwater (Drawdown) Plot."""
+        import matplotlib.pyplot as plt
+        
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        for name, rets in returns_dict.items():
+            equity = (1 + rets).cumprod()
+            running_max = equity.cummax()
+            drawdown = (equity / running_max) - 1
+            
+            # Highlight our strategies
+            lw = 2 if "L/S" in name or "Vol" in name else 1
+            alpha = 1.0 if "L/S" in name or "Vol" in name else 0.6
+            
+            ax.plot(drawdown.index, drawdown, label=name, linewidth=lw, alpha=alpha)
+            
+        ax.set_title("Underwater Plot (Drawdown over Time)")
+        ax.set_ylabel("Drawdown %")
+        ax.set_xlabel("Date")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='lower left')
+        ax.fill_between(drawdown.index, 0, -1, color='red', alpha=0.05) # Danger zone
+        
+        return fig
+
+    def plot_monthly_heatmap(self, returns):
+        """Generates a Monthly Returns Heatmap for a single strategy."""
+        import seaborn as sns
+        import matplotlib.pyplot as plt
+        
+        # Resample to monthly
+        monthly_rets = returns.resample('ME').apply(lambda x: np.prod(1 + x) - 1)
+        
+        # Create Pivot Table: Year vs Month
+        # Ensure we have month names
+        df_heatmap = pd.DataFrame({'Return': monthly_rets})
+        df_heatmap['Year'] = df_heatmap.index.year
+        df_heatmap['Month'] = df_heatmap.index.month
+        
+        pivot = df_heatmap.pivot(index='Year', columns='Month', values='Return')
+        
+        fig, ax = plt.subplots(figsize=(10, len(pivot)*0.5 + 2))
+        sns.heatmap(pivot, annot=True, fmt='.1%', cmap='RdYlGn', center=0, cbar=False, ax=ax)
+        ax.set_title("Monthly Returns Heatmap")
+        
+        return fig
+
+        # We need to pass config settings in, or grab them from global config if possible.
+        # Ideally, we pass them in __init__, but for now we'll hardcode what we know from the class state + defaults.
+        from . import config
+        config_data = [
+            {"Parameter": "Generated Date", "Value": str(pd.Timestamp.now())},
+            {"Parameter": "Target Horizon", "Value": f"{self.target_horizon} Days"},
+            {"Parameter": "Transaction Cost", "Value": "5 bps"},
+            {"Parameter": "Execution Frequency", "Value": str(getattr(config, 'EXECUTION_FREQUENCY', 'daily'))},
+            {"Parameter": "Model Type", "Value": str(getattr(config, 'MODEL_TYPE', 'Unknown'))},
+            {"Parameter": "Training Window", "Value": str(getattr(config, 'TRAIN_WINDOW_YEARS', 'Unknown')) + " Years"},
+            {"Parameter": "Big Move Threshold", "Value": str(getattr(config, 'BIG_MOVE_THRESHOLD', 0.03))},
+            {"Parameter": "Regime Logic", "Value": "RV_Ratio (Median Split)"},
+            {"Parameter": "Data Embargo", "Value": str(getattr(config, 'EMBARGO_ROWS', 0)) + " Days"},
+        ]
+        sheets['Configuration'] = pd.DataFrame(config_data)
         
         # Save to Excel
         excel_path = save_path if save_path.endswith('.xlsx') else save_path + '.xlsx'
@@ -406,7 +726,17 @@ class BacktestEngine:
                             len(str(col))
                         )
                         col_letter = get_column_letter(idx)
-                        worksheet.column_dimensions[col_letter].width = min(max_length + 2, 50)
+                        col_letter = get_column_letter(idx)
+                        # Specific width for Context sheet details
+                        if sheet_name == 'Report Context' and col == 'Details':
+                            worksheet.column_dimensions[col_letter].width = 100
+                            # Wrap text for details
+                            from openpyxl.styles import Alignment
+                            for row in range(2, len(df) + 2):
+                                cell = worksheet.cell(row=row, column=idx)
+                                cell.alignment = Alignment(wrap_text=True)
+                        else:
+                            worksheet.column_dimensions[col_letter].width = min(max_length + 2, 50)
                     
                     # Format header
                     from openpyxl.styles import Font, PatternFill, Alignment
@@ -419,14 +749,18 @@ class BacktestEngine:
                         cell.alignment = Alignment(horizontal="center", vertical="center")
                     
                     # Format percentage columns
-                    from openpyxl.styles.numbers import FORMAT_PERCENTAGE_00
+                    from openpyxl.styles.numbers import FORMAT_PERCENTAGE_00, FORMAT_NUMBER_00
                     pct_keywords = ['return', 'cagr', 'volatility', 'dd', 'win rate', 'sharpe']
                     for col_idx, col_name in enumerate(df.columns):
                         if any(kw in str(col_name).lower() for kw in pct_keywords):
                             for row in range(2, len(df) + 2):
                                 cell = worksheet.cell(row=row, column=col_idx + 1)
-                                if isinstance(cell.value, (int, float)) and abs(cell.value) < 10:
-                                    cell.number_format = FORMAT_PERCENTAGE_00
+                                if isinstance(cell.value, (int, float)):
+                                    # Sharpe is not a percent
+                                    if 'sharpe' in str(col_name).lower():
+                                        cell.number_format = FORMAT_NUMBER_00
+                                    elif abs(cell.value) < 10: # Reasonable check for percent
+                                        cell.number_format = FORMAT_PERCENTAGE_00
             
             print(f"✅ Boss Report Excel saved to: {excel_path}")
             

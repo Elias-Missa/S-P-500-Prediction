@@ -1,20 +1,7 @@
 import pandas as pd
 import numpy as np
 
-def calculate_ma_dist_200(close_series):
-    """
-    Calculates the distance from the 200-day Simple Moving Average.
-    
-    Formula: (Close - 200SMA) / 200SMA
-    
-    Args:
-        close_series (pd.Series): Time series of close prices.
-        
-    Returns:
-        pd.Series: The distance from 200SMA.
-    """
-    sma_200 = close_series.rolling(window=200).mean()
-    return (close_series - sma_200) / sma_200
+
 
 def calculate_hurst(series, window=100):
     """

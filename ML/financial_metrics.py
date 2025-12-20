@@ -37,7 +37,12 @@ def generate_boss_metrics(strategy_returns, periods=252):
     """Generates the dictionary of metrics for the report."""
     # 1. Basics
     total_ret = np.prod(1 + strategy_returns) - 1
-    ann_ret = strategy_returns.mean() * periods
+    # Geometric CAGR: (1 + total_ret)^(periods/N) - 1
+    n_days = len(strategy_returns)
+    if n_days > 0:
+        ann_ret = (1 + total_ret)**(periods / n_days) - 1
+    else:
+        ann_ret = 0.0
     ann_vol = strategy_returns.std() * np.sqrt(periods)
     
     # 2. Risk
@@ -72,7 +77,12 @@ def generate_boss_metrics_enhanced(strategy_returns, market_returns, periods=252
     """Generates enhanced dictionary of metrics for the boss report."""
     # Basic metrics (from original function)
     total_ret = np.prod(1 + strategy_returns) - 1
-    ann_ret = strategy_returns.mean() * periods
+    # Geometric CAGR
+    n_days = len(strategy_returns)
+    if n_days > 0:
+        ann_ret = (1 + total_ret)**(periods / n_days) - 1
+    else:
+        ann_ret = 0.0
     ann_vol = strategy_returns.std() * np.sqrt(periods)
     
     # Risk metrics
@@ -93,13 +103,21 @@ def generate_boss_metrics_enhanced(strategy_returns, market_returns, periods=252
     # Additional metrics
     # Beta vs Market (if aligned)
     if len(strategy_returns) == len(market_returns):
-        covariance = np.cov(strategy_returns, market_returns)[0, 1]
-        market_variance = np.var(market_returns)
-        beta = covariance / market_variance if market_variance > 0 else 0
-        correlation = np.corrcoef(strategy_returns, market_returns)[0, 1]
-    else:
-        beta = 0
-        correlation = 0
+        # Sanitize inputs for correlation/beta
+        strat_clean = np.nan_to_num(strategy_returns, nan=0.0, posinf=0.0, neginf=0.0)
+        market_clean = np.nan_to_num(market_returns, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        covariance = np.cov(strat_clean, market_clean)[0, 1]
+        market_variance = np.var(market_clean)
+        strat_variance = np.var(strat_clean)
+        
+        # Check variance thresholds to avoid RuntimeWarning (div by zero)
+        beta = covariance / market_variance if market_variance > 1e-8 else 0
+        
+        if market_variance > 1e-8 and strat_variance > 1e-8:
+            correlation = np.corrcoef(strat_clean, market_clean)[0, 1]
+        else:
+            correlation = 0
     
     # Skewness and Kurtosis
     ret_skew = skew(strategy_returns)
