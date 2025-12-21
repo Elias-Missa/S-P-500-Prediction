@@ -104,7 +104,8 @@ class BacktestEngine:
         
         # Run Benchmark (Buy & Hold)
         bench_ret = self.df['market_ret']
-        bench_metrics = financial_metrics.generate_boss_metrics(bench_ret)
+        # Benchmark vs itself gives Beta=1, Capture=100%
+        bench_metrics = financial_metrics.generate_boss_metrics_enhanced(bench_ret, bench_ret)
         
         # Prepare Data Rows
         rows = []
@@ -115,28 +116,42 @@ class BacktestEngine:
         for name, mode, strat in scenarios:
             try:
                 rets = self.run_scenario(mode, strat)
-                m = financial_metrics.generate_boss_metrics(rets)
+                m = financial_metrics.generate_boss_metrics_enhanced(rets, bench_ret)
                 rows.append([name] + list(m.values()))
             except Exception as e:
                 print(f"Skipping scenario {name}: {e}")
 
         # Define Column Groups
-        # Full keys: Total Return, CAGR, Volatility, Sharpe, Sortino, Calmar, Max DD, DD Duration, Win Rate, Profit Factor
         keys = list(bench_metrics.keys())
+        # keys = ['Total Return', 'CAGR', 'Volatility', 'Sharpe Ratio', 'Sortino Ratio', 'Calmar Ratio', 'Max Drawdown', 'DD Duration (days)', 'Win Rate', 'Profit Factor', 'Beta vs SPY', 'Correlation vs SPY', 'Up Capture', 'Down Capture', ...]
         
         # Table 1: Returns & Risk
-        # Indices: 0, 1, 2, 3, 4, 5 (Total Return to Calmar)
+        # Include core returns + Sharpe/Sortino/Calmar
+        # indices: 0-5 (Total Ret, CAGR, Vol, Sharpe, Sortino, Calmar)
         headers_1 = ["Strategy"] + keys[:6]
         
-        # Table 2: Drawdown & Trade Stats
-        # Indices: 6, 7, 8, 9 (Max DD to Profit Factor)
-        headers_2 = ["Strategy"] + keys[6:]
+        # Table 2: Drawdown, Trade Stats & Capture Profile
+        # indices: 6-13 (Max DD, Dur, Win Rate, Profit Factor, Beta, Correl, Up Cap, Down Cap)
+        # Note: keys[6] is Max DD. keys[13] is Down Capture. 
+        # We'll take everything from Max DD up to Down Capture for Table 2.
+        # Remaining stats (Skew, VaR etc) can be omitted from MD to keep it clean, or added to Table 3.
+        # Let's include Beta/Capture in Table 2.
+        headers_2 = ["Strategy"] + keys[6:14] 
+        
+        # Table 3 (Optional): Tail Risk & Dist? 
+        # Let's stick to 2 tables for now, but ensure Beta/Capture are visible.
         
         # Construct Markdown
-        md = "\n## 💼 Boss Report: Trading Strategy Analysis\n"
+        md = "# 💼 BOSS REPORT: Trading Strategy Analysis\n\n"
         
+        # --- Prepend Report Context (Executive Summary, Architecture, etc.) ---
+        if self.report_context:
+            for section, text in self.report_context.items():
+                md += f"## {section}\n"
+                md += f"{text}\n\n"
+                
         # --- Strategy Explanations ---
-        md += "### 📘 Strategy Definitions\n"
+        md += "## Appendix: Strategy Definitions\n"
         md += "To ensure full visibility on how these backtests operate, here are the detailed mechanics of each strategy:\n\n"
         
         md += "**1. L/S (Daily Overlap)**\n"
@@ -164,14 +179,11 @@ class BacktestEngine:
         md += "- **Mechanics**: We target 15% annualized volatility. Leverage = 15% / Current Vol. Direction follows model.\n"
         md += "- **Position**: Variable leverage (Capped at 2x). E.g., if Vol is 30% -> 0.5x position. If Vol is 10% -> 1.5x position.\n\n"
 
-
-        md += "**5. Vol Target 15% (Daily)**\n"
-        md += "- **Concept**: Risk parity approach. Trade larger when market is calm, smaller when volatile.\n"
-        md += "- **Mechanics**: We target 15% annualized volatility. Leverage = 15% / Current Vol. Direction follows model.\n"
-        md += "- **Position**: Variable leverage (Capped at 2x). E.g., if Vol is 30% -> 0.5x position. If Vol is 10% -> 1.5x position.\n\n"
-
         
         md += "> **Note**: Simulation includes 5bps transaction costs per turnover (slippage + comms).\n\n"
+        
+        # --- Performance Summary Section ---
+        md += "## Performance Summary\n\n"
         
         # --- Table 1 ---
         md += "### 📈 Returns & Risk Metrics\n"
@@ -191,8 +203,9 @@ class BacktestEngine:
         md += "| " + " | ".join(["---"] * len(headers_2)) + " |\n"
         
         for row in rows:
-            # Strategy Name + Remaining metrics
-            table_row = [row[0]] + row[7:]
+            # Strategy Name + Metrics for Table 2 (Max DD to Down Capture)
+            # indices 7 to 15 (8 items matching headers_2)
+            table_row = [row[0]] + row[7:15]
             md += "| " + " | ".join(table_row) + " |\n"
             
         return md

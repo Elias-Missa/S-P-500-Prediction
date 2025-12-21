@@ -127,6 +127,9 @@ class ModelFactory:
             high_model = params.pop('high_model', getattr(config, 'REGIME_HIGH_MODEL', 'RandomForest'))
             return RegimeGatedHybrid(low_model=low_model, high_model=high_model, **params)
 
+        elif model_type == 'TrendGatedHybrid':
+            return TrendGatedHybrid(**overrides)
+
         else:
             raise ValueError(f"Unknown model type: {model_type}")
 
@@ -266,6 +269,81 @@ class RegimeGatedHybrid:
             y_pred[high_vol_mask] = self.high_vol_model.predict(X[high_vol_mask])
             
         return y_pred
+
+
+class TrendGatedHybrid:
+    def __init__(self, bull_model='Ridge', bear_model='XGBoost', regime_col='Dist_from_200MA', **kwargs):
+        self.bull_model_type = bull_model
+        self.bear_model_type = bear_model
+        # Use Dist_from_200MA: Positive = Price > 200MA (Bull), Negative = Price < 200MA (Bear)
+        self.regime_col = regime_col 
+        self.kwargs = kwargs
+        
+        # Bull Model (Trend/Momentum) - Defaults to Ridge
+        self.bull_model = ModelFactory.get_model(bull_model, overrides=kwargs)
+        
+        # Bear Model (Panic/Mean Reversion) - Defaults to XGBoost
+        # Note: XGBoost usually requires specific params separate from Ridge (like n_estimators)
+        # For now, we pass kwargs to both, assuming collisions are safe or handled by factories
+        self.bear_model = ModelFactory.get_model(bear_model, overrides=kwargs)
+        
+    def fit(self, X, y):
+        if self.regime_col not in X.columns:
+            raise ValueError(f"Regime column '{self.regime_col}' not found. Cannot determine Trend Regime.")
+            
+        # Regime Logic: 
+        # Bull: Dist > 0 (Price > 200MA) -> Use Bull Model (Ridge)
+        # Bear: Dist <= 0 (Price <= 200MA) -> Use Bear Model (XGBoost)
+        self.regime_threshold = 0.0
+        
+        bull_mask = X[self.regime_col] > self.regime_threshold
+        bear_mask = ~bull_mask
+        
+        # Train Bull Model (on Bull Data)
+        if bull_mask.sum() > 0:
+            self.bull_model.fit(X[bull_mask], y[bull_mask])
+            
+        # Train Bear Model (on Bear Data)
+        if bear_mask.sum() > 0:
+            self.bear_model.fit(X[bear_mask], y[bear_mask])
+            
+        return self
+        
+    def predict(self, X):
+        if self.regime_col not in X.columns:
+            raise ValueError(f"Regime column '{self.regime_col}' not found.")
+            
+        # Identify Regimes
+        bull_mask = X[self.regime_col] > self.regime_threshold
+        bear_mask = ~bull_mask
+        
+        y_pred = np.zeros(len(X))
+        
+        # Bull Predictions
+        if bull_mask.sum() > 0:
+            y_pred[bull_mask] = self.bull_model.predict(X[bull_mask])
+            
+        # Bear Predictions
+        if bear_mask.sum() > 0:
+            y_pred[bear_mask] = self.bear_model.predict(X[bear_mask])
+            
+        return y_pred
+    
+    @property
+    def feature_importances_(self):
+        """Averages importance from both sub-models if available."""
+        try:
+            bull_fi = getattr(self.bull_model, 'feature_importances_', getattr(self.bull_model, 'coef_', None))
+            bear_fi = getattr(self.bear_model, 'feature_importances_', getattr(self.bear_model, 'coef_', None))
+            
+            # If coef_ is 1D or 2D, normalize or just average? Mean implies simple combination.
+            # Ridge coef is (n_features,), XGB feature_importances_ is (n_features,)
+            if bull_fi is not None and bear_fi is not None:
+                # Handle potential shape mismatch if one is array/list
+                return (np.array(bull_fi) + np.array(bear_fi)) / 2.0
+            return bull_fi if bull_fi is not None else bear_fi
+        except Exception:
+            return None
 
 class LSTMModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, num_layers, output_dim=1, dropout=0.2):

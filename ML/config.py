@@ -116,6 +116,9 @@ MLP_ALPHA = 0.0001
 MLP_MAX_ITER = 500
 
 # LSTM Params
+# LSTM_CONFIG_NAME options: 'default', 'alpha_v1', 'trend_long', 'deep_value', 'debug'
+LSTM_CONFIG_NAME = 'alpha_v1'
+
 # Chosen for daily data with 21d horizon: moderate capacity, stable training
 LSTM_TIME_STEPS = 20  # lookback window (days) for sequence creation
 LSTM_LOOKBACK_CANDIDATES = [10, 20, 30, 45, 60]  # Optuna search space
@@ -157,6 +160,7 @@ TFT_HIDDEN_DIM = 64
 TFT_NUM_HEADS = 4
 TFT_LAYERS = 2
 TFT_DROPOUT = 0.1
+# TFT_EPOCHS = 1 # Debug Mode
 
 # -----------------------------------------------------------------------------
 # Tuning Configuration (Optuna)

@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
-from ML import config, data_prep, models, utils, metrics, lstm_dataset, tuning
+from ML import config, data_prep, models, utils, metrics, lstm_dataset, tuning, lstm_configs
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
@@ -17,6 +17,10 @@ def main():
     logger = utils.ExperimentLogger(model_name=config.MODEL_TYPE, process_tag="WalkForward", loss_tag=loss_tag)
     
     print("--- Walk-Forward Validation ---")
+
+    # Detect Device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using Device: {device}")
     
     # 1. Load Data using dataset_builder for proper frequency handling
     df, metadata = data_prep.load_dataset(use_builder=True)
@@ -299,7 +303,24 @@ def main():
             # --- Deep Learning Training Logic ---
             # Determine time_steps for deep models (use tuned params if available)
             time_steps = None
+            lstm_config_overrides = {}
+            
             if config.MODEL_TYPE == 'LSTM':
+                # Load selected LSTM config preset if available
+                config_name = getattr(config, 'LSTM_CONFIG_NAME', 'default')
+                preset_config = lstm_configs.LSTM_CONFIGS.get(config_name, lstm_configs.LSTM_CONFIGS['default'])
+                print(f"Using LSTM Config: {config_name}")
+                
+                # Apply preset config values as base overrides
+                lstm_config_overrides['hidden_dim'] = preset_config.get('hidden_dim', config.LSTM_HIDDEN_DIM)
+                lstm_config_overrides['num_layers'] = preset_config.get('num_layers', config.LSTM_LAYERS)
+                lstm_config_overrides['dropout'] = preset_config.get('dropout', 0.2)
+                lstm_config_overrides['lr'] = preset_config.get('learning_rate', config.LSTM_LEARNING_RATE)
+                lstm_config_overrides['batch_size'] = preset_config.get('batch_size', config.LSTM_BATCH_SIZE)
+                lstm_config_overrides['epochs'] = preset_config.get('epochs', config.LSTM_EPOCHS)
+                
+                time_steps = best_params.get('time_steps', preset_config.get('time_steps', config.LSTM_TIME_STEPS))
+            elif config.MODEL_TYPE == 'LSTM':
                 time_steps = best_params.get('time_steps', getattr(config, 'LSTM_TIME_STEPS', 10))
             elif config.MODEL_TYPE == 'CNN':
                 time_steps = best_params.get('time_steps', getattr(config, 'CNN_TIME_STEPS', 10))
@@ -404,7 +425,7 @@ def main():
             
             # 4. Create DataLoader (use tuned batch_size if available)
             if config.MODEL_TYPE == 'LSTM':
-                batch_size = best_params.get('batch_size', config.LSTM_BATCH_SIZE)
+                batch_size = best_params.get('batch_size', lstm_config_overrides.get('batch_size', config.LSTM_BATCH_SIZE))
             elif config.MODEL_TYPE == 'CNN':
                 batch_size = best_params.get('batch_size', config.CNN_BATCH_SIZE)
             elif config.MODEL_TYPE == 'Transformer':
@@ -446,13 +467,13 @@ def main():
             weight_decay = 0
             if config.MODEL_TYPE == 'LSTM':
                 # Apply tuned params to LSTM model
-                hidden_dim = best_params.get('hidden_dim', config.LSTM_HIDDEN_DIM)
-                num_layers = best_params.get('num_layers', config.LSTM_LAYERS)
-                dropout = best_params.get('dropout', 0.2)
+                hidden_dim = best_params.get('hidden_dim', lstm_config_overrides.get('hidden_dim', config.LSTM_HIDDEN_DIM))
+                num_layers = best_params.get('num_layers', lstm_config_overrides.get('num_layers', config.LSTM_LAYERS))
+                dropout = best_params.get('dropout', lstm_config_overrides.get('dropout', 0.2))
                 from ML.models import LSTMModel
                 model = LSTMModel(input_dim, hidden_dim, num_layers, output_dim=1, dropout=dropout)
-                lr = best_params.get('lr', config.LSTM_LEARNING_RATE)
-                epochs = config.LSTM_EPOCHS
+                lr = best_params.get('lr', lstm_config_overrides.get('lr', config.LSTM_LEARNING_RATE))
+                epochs = lstm_config_overrides.get('epochs', config.LSTM_EPOCHS)
             elif config.MODEL_TYPE == 'CNN':
                 # Apply tuned params to CNN model
                 filters = best_params.get('filters', config.CNN_FILTERS)
@@ -472,7 +493,7 @@ def main():
                 from ML.tft_model import TFTModel
                 model = TFTModel(input_dim, hidden_dim, num_heads, num_layers, dropout=dropout, output_dim=1)
                 lr = best_params.get('lr', 1e-3)
-                epochs = 50 # Default epochs for TFT
+                epochs = getattr(config, 'TFT_EPOCHS', 50)
             elif config.MODEL_TYPE == 'Transformer':
                 # Apply tuned params to Transformer model
                 model_dim = best_params.get('model_dim', config.TRANSFORMER_MODEL_DIM)
@@ -519,12 +540,14 @@ def main():
             patience_counter = 0
             best_model_state = None  # To save the best weights
             
+            model.to(device)
             model.train()
             
             for epoch in range(epochs):
                 # 1. Training Step
                 epoch_loss = 0.0
                 for X_batch, y_batch in train_loader:
+                    X_batch, y_batch = X_batch.to(device), y_batch.to(device)
                     optimizer.zero_grad()
                     outputs = model(X_batch)
                     loss = utils.compute_loss(
@@ -549,6 +572,7 @@ def main():
                     val_loss_sum = 0.0
                     with torch.no_grad():
                         for X_v, y_v in val_loader:
+                            X_v, y_v = X_v.to(device), y_v.to(device)
                             out_v = model(X_v)
                             loss_v = utils.compute_loss(
                                 y_pred=out_v,
@@ -595,34 +619,34 @@ def main():
             model.eval()
             with torch.no_grad():
                 # Predict on train set
-                X_train_tensor = torch.tensor(X_train_seq, dtype=torch.float32)
-                y_train_pred_scaled = model(X_train_tensor).numpy().flatten()
+                X_train_tensor = torch.tensor(X_train_seq, dtype=torch.float32).to(device)
+                y_train_pred_scaled = model(X_train_tensor).cpu().numpy().flatten()
                 y_train_pred = y_train_pred_scaled * y_std + y_mean
                 y_train_actual = y_train.iloc[time_steps-1:].values
                 
                 # Predict on test set
-                X_test_tensor = torch.tensor(X_test_seq, dtype=torch.float32)
-                y_pred_scaled = model(X_test_tensor).numpy().flatten()
+                X_test_tensor = torch.tensor(X_test_seq, dtype=torch.float32).to(device)
+                y_pred_scaled = model(X_test_tensor).cpu().numpy().flatten()
             
             # Unscale predictions back to original scale
             # For vol_scale: y_mean is 0.0, so this simplifies to y_pred * y_std
             # For standardize: y_pred * y_std + y_mean
             y_pred = y_pred_scaled * y_std + y_mean
                 
-            # Adjust Actuals (slice off first time_steps-1) - use raw y_test for metrics
-            y_test = y_test.iloc[time_steps-1:]
+            # Adjust Actuals - NO slicing needed for test/val as we expanded inputs!
+            # y_test = y_test.iloc[time_steps-1:] 
             
             # --- Compute Validation Metrics if val set is available ---
             y_val_pred, y_val_actual = None, None
-            if has_val_set and X_val_orig is not None and len(X_val_orig) >= time_steps:
-                # Scale val features using train-fitted scaler
-                X_val_scaled = scaler.transform(X_val_orig)
+            if has_val_set and X_val_dl is not None:
+                # Use expanded Val data so we don't lose the first few samples
+                X_val_scaled = scaler.transform(X_val_dl)
                 
                 # Scale val targets using train stats
                 if scaling_mode == "vol_scale":
-                    y_val_scaled = y_val_orig / y_std
+                    y_val_scaled = y_val_dl / y_std
                 else:
-                    y_val_scaled = (y_val_orig - y_mean) / y_std
+                    y_val_scaled = (y_val_dl - y_mean) / y_std
                 
                 # Create sequences for val
                 X_val_seq, _ = lstm_dataset.create_sequences(X_val_scaled, y_val_scaled.values, time_steps)
@@ -630,14 +654,16 @@ def main():
                 if len(X_val_seq) > 0:
                     # Predict on val
                     with torch.no_grad():
-                        X_val_tensor = torch.tensor(X_val_seq, dtype=torch.float32)
-                        y_val_pred_scaled = model(X_val_tensor).numpy().flatten()
+                        X_val_tensor = torch.tensor(X_val_seq, dtype=torch.float32).to(device)
+                        y_val_pred_scaled = model(X_val_tensor).cpu().numpy().flatten()
                     
                     # Unscale val predictions
                     y_val_pred = y_val_pred_scaled * y_std + y_mean
                     
-                    # Slice val actuals to match sequence output
-                    y_val_actual = y_val_orig.iloc[time_steps-1:].values
+                    # Actuals match predictions (full val set)
+                    # Because we used expanded inputs, the outputs align exactly with y_val_orig
+                    y_val_actual = y_val_orig.values 
+
             
         else:
             # --- Standard ML Training ---
@@ -1298,6 +1324,15 @@ def main():
                 "  - In Low Volatility regimes, it uses a specific sub-model (e.g., Ridge) optimized for steady trends.\n"
                 "  - In High Volatility regimes, it switches to a different sub-model (e.g., RandomForest) dealing with non-linear stress.\n"
                 f"Structure: {params if params else 'Default Configuration'}"
+            )
+        elif 'TrendGated' in model_type:
+            return (
+                f"Model Type: {model_type} (Trend Following Hybrid)\n"
+                "Mechanism: Dual-model architecture that switches based on Market Trend (Price vs 200MA).\n"
+                "  - BULL Regime (Price > 200MA): Uses 'Bull Model' (e.g., Ridge) to capture Momentum/Drift.\n"
+                "  - BEAR Regime (Price <= 200MA): Uses 'Bear Model' (e.g., XGBoost) to capture Panic/Reversion.\n"
+                "  - Logic: 'Don't fight the trend'. Use linear models when markets are behaving, non-linear when broken.\n"
+                f"Structure: {params if params else 'Bull=Ridge, Bear=XGBoost'}"
             )
         elif 'TFT' in model_type:
             return (

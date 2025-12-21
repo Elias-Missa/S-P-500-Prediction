@@ -141,6 +141,9 @@ def generate_boss_metrics_enhanced(strategy_returns, market_returns, periods=252
     # Average trade return
     avg_trade_ret = strategy_returns[strategy_returns != 0].mean() if (strategy_returns != 0).sum() > 0 else 0
     
+    # Capture Ratios (Up/Down)
+    up_capture, down_capture = calculate_capture_ratios(strategy_returns, market_returns)
+    
     return {
         # Core metrics
         "Total Return": f"{total_ret:.2%}",
@@ -157,6 +160,8 @@ def generate_boss_metrics_enhanced(strategy_returns, market_returns, periods=252
         # Enhanced metrics
         "Beta vs SPY": f"{beta:.2f}",
         "Correlation vs SPY": f"{correlation:.3f}",
+        "Up Capture": f"{up_capture:.2f}",
+        "Down Capture": f"{down_capture:.2f}",
         "Best Month": f"{best_month:.2%}",
         "Worst Month": f"{worst_month:.2%}",
         "Skewness": f"{ret_skew:.2f}",
@@ -166,3 +171,29 @@ def generate_boss_metrics_enhanced(strategy_returns, market_returns, periods=252
         "Avg Trade Return": f"{avg_trade_ret:.2%}",
         "Number of Trades": f"{position_changes}",
     }
+
+def calculate_capture_ratios(strategy_returns, benchmark_returns):
+    """Calculates Up and Down Capture Ratios."""
+    # Ensure alignment
+    if len(strategy_returns) != len(benchmark_returns):
+        return 0.0, 0.0
+        
+    # Sanitize
+    strat = np.nan_to_num(strategy_returns, nan=0.0)
+    bench = np.nan_to_num(benchmark_returns, nan=0.0)
+    
+    # Up Capture: Avg Strat Return when Bench > 0 / Avg Bench Return when Bench > 0
+    up_mask = bench > 0
+    if up_mask.sum() > 0:
+        up_capture = strat[up_mask].mean() / bench[up_mask].mean()
+    else:
+        up_capture = 0.0
+        
+    # Down Capture: Avg Strat Return when Bench < 0 / Avg Bench Return when Bench < 0
+    down_mask = bench < 0
+    if down_mask.sum() > 0:
+        down_capture = strat[down_mask].mean() / bench[down_mask].mean()
+    else:
+        down_capture = 0.0
+        
+    return up_capture, down_capture
