@@ -19,6 +19,10 @@ FEAT_BREADTH_THRUST_WINDOW = 5  # 1 week for breadth momentum
 # Regime Settings
 REGIME_BREADTH_THRESHOLD = 0.5 # 50% stocks above 50MA = Bull
 
+# Data Rehab (Feature Transformation) Flag
+APPLY_DATA_REHAB = True  # If True, applies feature_rehab pipeline (diffs, Z-scores, drops) in dataset_builder
+
+
 # ===============================
 # Dataset Frequency & Target Configuration
 # ===============================

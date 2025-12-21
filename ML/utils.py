@@ -42,6 +42,43 @@ def compute_loss(y_pred, y_true, loss_mode="mse",
     else:
         raise ValueError(f"Unknown LOSS_MODE: {loss_mode}")
 
+
+def validate_trading_calendar(df):
+    """
+    Validates that the DataFrame index is a valid trading calendar.
+    
+    Checks:
+    1. Monotonic increasing
+    2. Unique
+    3. No weekends (Saturday/Sunday)
+    
+    Raises:
+        ValueError: If any check fails, with details on offending dates.
+    """
+    if df.empty:
+        return
+
+    # 1. Monotonicity
+    if not df.index.is_monotonic_increasing:
+        raise ValueError("Calendar Error: Index is not monotonic increasing.")
+
+    # 2. Uniqueness
+    if not df.index.is_unique:
+        duplicates = df.index[df.index.duplicated()].unique()
+        raise ValueError(f"Calendar Error: Index contains duplicates. First 10: {duplicates[:10].tolist()}")
+
+    # 3. No Weekends
+    # weekday(): Mon=0, Sun=6. >=5 means Sat or Sun.
+    weekends = df.index[df.index.weekday >= 5]
+    if not weekends.empty:
+        raise ValueError(f"Calendar Error: Index contains {len(weekends)} weekend dates. First 10: {weekends[:10].tolist()}")
+    
+    # Optional: Check for large gaps (e.g. > 5 days) just to warn?
+    # For now, we stick to the hard requirements requested.
+    
+    print("[Calendar Check] validating_trading_calendar: PASSED (Monotonic, Unique, No Weekends)")
+
+
 class ExperimentLogger:
     def __init__(self, model_name="Model", process_tag="Static", loss_tag=None):
         # Create base ML_Output directory

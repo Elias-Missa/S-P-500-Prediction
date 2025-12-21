@@ -14,6 +14,8 @@ This module handles:
 import pandas as pd
 import numpy as np
 from . import config
+from .utils import validate_trading_calendar
+from .feature_rehab import rehab_features
 
 
 def build_daily_features(data_path=None):
@@ -51,6 +53,16 @@ def build_daily_features(data_path=None):
         print("[DatasetBuilder] Dropping redundant 'MA_Dist_200' (duplicate of 'Dist_from_200MA')")
         df.drop(columns=['MA_Dist_200'], inplace=True)
 
+    # -------------------------------------------------------------------------
+    # DATA REHAB (Centralized Feature Transformation)
+    # -------------------------------------------------------------------------
+    if getattr(config, "APPLY_DATA_REHAB", False):
+        df = rehab_features(df)
+        
+        # After rehab, price_series needs to be re-aligned because rehab drops warmup rows
+        price_series = price_series.loc[df.index]
+    # -------------------------------------------------------------------------
+
     
     # Only forward-fill explicitly listed macro columns (no backward-fill!)
     macro_ffill_cols = getattr(config, "MACRO_FFILL_COLS", [])
@@ -61,6 +73,8 @@ def build_daily_features(data_path=None):
         df[existing_ffill_cols] = df[existing_ffill_cols].ffill()
     
     # Drop warmup rows with NaNs (rolling indicators produce NaNs at start)
+    # Note: rehab_features already does this, but keeping it for safety 
+    # if rehab is disabled or if ffill introduced issues (unlikely)
     initial_rows = len(df)
     nan_counts = df.isna().sum()
     nan_counts = nan_counts[nan_counts > 0]
@@ -82,6 +96,9 @@ def build_daily_features(data_path=None):
     if len(nan_counts) > 0:
         print(f"  Columns with NaNs before drop: {nan_counts.to_dict()}")
     
+    # Final Guardrail Check on the clean daily features
+    validate_trading_calendar(df)
+
     return df, price_series
 
 

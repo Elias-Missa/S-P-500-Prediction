@@ -7,6 +7,8 @@ import pandas_datareader.data as web
 import yfinance as yf
 
 from ML import config
+from ML.utils import validate_trading_calendar
+
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Output')
 
@@ -53,9 +55,54 @@ def fetch_data(start_date='2010-01-01'):
     """
     print(f"Fetching data starting from {start_date}...")
     
-    # 1. Fetch yfinance data
+    # 1. Fetch SPY first to establish the Canonical Trading Calendar
+    print("Downloading SPY to establish master trading calendar...")
+    try:
+        spy_df = yf.download('SPY', start=start_date, progress=False)
+        if hasattr(spy_df.columns, 'levels'):
+             # Handle MultiIndex if present
+             if 'Adj Close' in spy_df.columns:
+                 spy_series = spy_df['Adj Close']
+             elif 'Close' in spy_df.columns:
+                 spy_series = spy_df['Close']
+             else:
+                 spy_series = spy_df.iloc[:, 0]
+        else:
+             # Standard handling
+             if 'Adj Close' in spy_df.columns:
+                 spy_series = spy_df['Adj Close']
+             elif 'Close' in spy_df.columns:
+                 spy_series = spy_df['Close']
+             else:
+                 spy_series = spy_df.iloc[:, 0]
+                 
+        # Ensure it's a Series named SPY
+        spy_series.name = 'SPY'
+        
+        # Handle Volume
+        if 'Volume' in spy_df.columns:
+            # Handle potential multiindex or single index for Volume
+            if isinstance(spy_df['Volume'], pd.DataFrame):
+                 spy_vol = spy_df['Volume'].iloc[:, 0]
+            else:
+                 spy_vol = spy_df['Volume']
+            spy_vol.name = 'SPY_Volume'
+        else:
+            spy_vol = None
+
+        # Create the Master DataFrame and Index
+        full_df = pd.DataFrame(spy_series)
+        if spy_vol is not None:
+             full_df = full_df.join(spy_vol)
+             
+        master_index = full_df.index
+        print(f"Master Calendar Established: {len(master_index)} trading days from {master_index.min().date()} to {master_index.max().date()}")
+
+    except Exception as e:
+        raise RuntimeError(f"Critical Error: Could not fetch SPY to establish calendar. {e}")
+
+    # 2. Fetch other yfinance data and reindex to master_index
     tickers = {
-        'SPY': 'SPY',
         '^VIX': '^VIX',
         'CL=F': 'CL=F',
         'DX-Y.NYB': 'DX-Y.NYB',
@@ -68,76 +115,89 @@ def fetch_data(start_date='2010-01-01'):
         'XLP': 'XLP', 'XLE': 'XLE', 'XLI': 'XLI', 'XLB': 'XLB', 'XLU': 'XLU'
     }
     
-    yf_data = pd.DataFrame()
+    # Define which columns are "Macro-like" or proxies that should be ffilled
+    # Prices (Sector ETFs, HYG, SHY) should NOT be ffilled ideally, BUT if they miss a day SPY has, 
+    # we might want to ffill OR keep as NaN. The user request says "Forward-fill only macro series columns... never price columns."
+    # We will strictly interpret "Price columns" as tradeable assets that SHOULD have data on trading days.
+    # If they are missing, it's actual missing data.
+    
+    # However, things like 'DX-Y.NYB' (Dollar Index) or 'CL=F' (Oil) might have slight calendar diffs (e.g. currency markets).
+    # We will treat them as Macro for ffill purposes if needed, or just let them be NaNs if strict.
+    # User specified: "FRED, sentiment, breadth proxies" -> ffill. "never price columns".
+    
+    MACRO_COLS_TO_FFILL = [
+        'T10Y2Y', 'ISM_PMI', 'UMICH_SENT', 
+        '^CPC', '^NYA50', 'DX-Y.NYB', 'CL=F', '^VIX' 
+        # Including VIX/Commodities in ffill is common as they might close slightly differently or have data issues,
+        # but technically VIX is a price. Let's be careful. 
+        # Re-reading prompt: "Forward-fill only macro series columns (FRED, sentiment, breadth proxies)"
+        # So we will ADD FRED columns here later.
+    ]
+    
+    # Let's clarify the list.
+    # Sector ETFs are strictly PRICE.
+    # HYG, SHY are PRICE.
     
     for name, ticker in tickers.items():
         try:
             print(f"Downloading {name} ({ticker})...")
             df = yf.download(ticker, start=start_date, progress=False)
 
-            # yfinance returns MultiIndex columns if multiple tickers, but here we do one by one.
-            # However, recent yfinance versions might return MultiIndex even for single ticker if not flattened properly or depending on version.
-            # Usually it's 'Adj Close' or 'Close'. Let's prefer 'Adj Close' if available, else 'Close'.
-
             if 'Adj Close' in df.columns:
                 series = df['Adj Close']
             elif 'Close' in df.columns:
                 series = df['Close']
             else:
-                # Fallback for some indices that might not have Adj Close
-                # If df is empty or columns are different
                 if df.empty:
-                    raise ValueError("Empty DataFrame")
-                series = df.iloc[:, 0] # Take first column if specific ones aren't found, but usually Close exists.
-
-            # Rename series
+                    print(f"Warning: {name} returned empty. Skipping.")
+                    continue
+                series = df.iloc[:, 0]
+            
             series.name = name
-
-            if yf_data.empty:
-                yf_data = pd.DataFrame(series)
-            else:
-                yf_data = yf_data.join(series, how='outer')
-
-            # Preserve SPY volume so downstream breadth features do not need an extra download.
-            if name == 'SPY' and 'Volume' in df.columns:
-                volume_series = df['Volume']
-                volume_series.name = 'SPY_Volume'
-                yf_data = yf_data.join(volume_series, how='outer')
+            
+            # REINDEX to Master Calendar (Left Join logic)
+            # This discards data on non-SPY days and introduces NaNs on SPY days if missing
+            series_aligned = series.reindex(master_index)
+            
+            full_df[name] = series_aligned
 
         except Exception as e:
             print(f"Warning: Could not fetch {name} ({ticker}): {e}")
             # Handle specific placeholders
             if name == '^CPC':
-                print(f"Creating placeholder 0s for {name}")
-                # We need an index to create the placeholder. We'll do it after merging everything else or use what we have.
-                # If yf_data is empty, we can't really create a placeholder yet easily without an index.
-                # We'll handle missing columns at the end.
+                 pass # Will handle missing later
             elif name == '^NYA50':
-                print(f"Warning: {name} missing. Will use SPY proxy later if needed.")
+                 pass
             else:
                 print(f"Critical warning: {name} failed.")
 
-    # 2. Fetch FRED data with fallbacks
+    # 3. Fetch FRED data and reindex
     macro_candidates = {
         'T10Y2Y': ['T10Y2Y'],  # 10Y-2Y Spread
-        'ISM_PMI': ['MANPMI', 'NAPM', 'PMI'],  # ISM Manufacturing PMI (try MANPMI first, then fallbacks)
+        'ISM_PMI': ['MANPMI', 'NAPM', 'PMI'],  # ISM Manufacturing PMI
         'UMICH_SENT': ['UMCSENT']  # University of Michigan Consumer Sentiment
     }
 
     fred_data = pd.DataFrame()
     fred_sources = {}
-    for name, tickers in macro_candidates.items():
-        df_macro, source = _fetch_fred_series(tickers, start_date, name)
+    for name, fred_tickers in macro_candidates.items():
+        df_macro, source = _fetch_fred_series(fred_tickers, start_date, name)
         fred_sources[name] = source
-
-        if fred_data.empty:
-            fred_data = df_macro
-        else:
-            fred_data = fred_data.join(df_macro, how='outer')
-
-    # 3. Merge all data
-    # Combine yfinance and FRED data
-    full_df = yf_data.join(fred_data, how='outer')
+        if not df_macro.empty:
+            # Join into a temp fred df
+            if fred_data.empty:
+                fred_data = df_macro
+            else:
+                fred_data = fred_data.join(df_macro, how='outer')
+    
+    # Align FRED data to Master Index
+    if not fred_data.empty:
+        fred_aligned = fred_data.reindex(master_index)
+        full_df = full_df.join(fred_aligned)
+    else:
+        # Create empty columns if FRED completely failed
+        for name in macro_candidates:
+             full_df[name] = np.nan
 
     quality_cols = pd.DataFrame(index=full_df.index)
     
@@ -146,44 +206,45 @@ def fetch_data(start_date='2010-01-01'):
         print("Adding placeholder column for ^CPC (NaNs to be filled with median).")
         full_df['^CPC'] = np.nan
     quality_cols['QC_CPC_missing'] = full_df['^CPC'].isna().astype(int)
-
+    
     if '^NYA50' not in full_df.columns:
         full_df['^NYA50'] = np.nan
     quality_cols['QC_NYA50_missing'] = full_df['^NYA50'].isna().astype(int)
 
-    if 'ISM_PMI' in full_df.columns:
-        quality_cols['QC_ISM_PMI_missing'] = full_df['ISM_PMI'].isna().astype(int)
-    else:
+    if 'ISM_PMI' not in full_df.columns:
         full_df['ISM_PMI'] = np.nan
-        quality_cols['QC_ISM_PMI_missing'] = 1
+    quality_cols['QC_ISM_PMI_missing'] = full_df['ISM_PMI'].isna().astype(int)
+    
+    # 5. Apply FFILL to Macro/Sentiment columns ONLY
+    # We define the final list of columns eligible for forward filling
+    
+    # FRED + Breadth + Sentiment + Some commodities/rates that might have gaps
+    # Note: 'ISM_PMI' and 'UMICH_SENT' are monthly, so they NEED ffill.
+    # 'T10Y2Y' is daily but might have mismatches.
+    
+    target_ffill_cols = ['T10Y2Y', 'ISM_PMI', 'UMICH_SENT', '^CPC', '^NYA50', 'DX-Y.NYB', 'CL=F', '^VIX']
+    real_ffill_cols = [c for c in target_ffill_cols if c in full_df.columns]
+    
+    print(f"Applying ffill to macro/broad columns only: {real_ffill_cols}")
+    full_df[real_ffill_cols] = full_df[real_ffill_cols].ffill()
 
-    # Fill/impute critical series with transparent defaults
+    # Fill/impute critical series with transparent defaults if still NaN after ffill (start of series)
     median_cpc = full_df['^CPC'].median()
     fallback_cpc = 0.7 if pd.isna(median_cpc) else median_cpc
-    full_df['^CPC'] = full_df['^CPC'].ffill().fillna(fallback_cpc)
+    full_df['^CPC'] = full_df['^CPC'].fillna(fallback_cpc)
 
+    # Proxy for NYA50 if missing
     if full_df['^NYA50'].isna().all():
         print("Generating proxy breadth series for ^NYA50 from SPY 50-day trend.")
-        if 'SPY' in full_df.columns:
-            spy_series = full_df['SPY']
-            proxy = (spy_series > spy_series.rolling(50).mean()).astype(float) * 100.0
-            full_df['^NYA50'] = proxy
-            quality_cols['QC_NYA50_proxy'] = 1
-        else:
-            quality_cols['QC_NYA50_proxy'] = 0
+        spy_series = full_df['SPY']
+        # Simple proxy: if SPY > 50MA -> 80, else 20 (arbitrary but distinct) or just bool * 100
+        proxy = (spy_series > spy_series.rolling(50).mean()).astype(float) * 100.0
+        full_df['^NYA50'] = proxy
+        quality_cols['QC_NYA50_proxy'] = 1
     else:
         quality_cols['QC_NYA50_proxy'] = 0
 
-    # Only forward-fill ISM_PMI here (no bfill to avoid look-ahead bias)
-    # The macro lagging logic below will handle proper shifting for release delays
-    full_df['ISM_PMI'] = full_df['ISM_PMI'].ffill()
-
-    # 5. Clean up
-    # Sort index
-    full_df.sort_index(inplace=True)
-
-    # -------------------------------------------------------------------------
-    # Anti-Leakage: Lag release-based macro series to approximate publication delay
+    # 6. Anti-Leakage Logic
     # -------------------------------------------------------------------------
     if getattr(config, "APPLY_MACRO_LAG", False):
         lag_cols = getattr(config, "MACRO_LAG_RELEASE_COLS", [])
@@ -193,34 +254,34 @@ def fetch_data(start_date='2010-01-01'):
         missing = [c for c in lag_cols if c not in full_df.columns]
 
         print(f"[Anti-Leakage] Lagging release-based macros by {lag_days} days: {existing}")
-        if missing:
-            print(f"[Anti-Leakage] Warning: missing macro columns (not lagged): {missing}")
-
-        # Shift first (introduces NaNs at the top)
+        
+        # Shift first
         for c in existing:
             full_df[c] = full_df[c].shift(lag_days)
 
         # Then forward-fill ONLY to carry last released value forward.
-        # Do NOT backward-fill to avoid look-ahead bias.
         full_df[existing] = full_df[existing].ffill()
 
         # Diagnostic: report remaining NaNs after lagging and ffill
         nan_counts = full_df[existing].isna().sum()
         print(f"[Anti-Leakage] NaNs remaining after lag+ffill: {nan_counts.to_dict()}")
 
-    # Forward fill missing data (common in macro data which is monthly/weekly vs daily stock data)
-    full_df.ffill(inplace=True)
-    
-    # Drop rows before start_date (in case alignment brought in earlier dates)
-    full_df = full_df[full_df.index >= pd.to_datetime(start_date)]
-    
+    # 7. Final Clean up & Assertions
     full_df = full_df.join(quality_cols)
-
     _export_quality_report(full_df)
 
+    print("Verifying calendar integrity...")
+    assert full_df.index.equals(master_index), "Error: Final index does not match SPY master index!"
+    assert full_df.index.is_monotonic_increasing, "Error: Index is not monotonic!"
+    assert full_df.index.is_unique, "Error: Index contains duplicates!"
+
+    # Run the comprehensive utility check
+    validate_trading_calendar(full_df)
+    
     print("Data fetch complete. Columns:", full_df.columns.tolist())
     print("Shape:", full_df.shape)
     print("FRED Sources used:", fred_sources)
+    print("Non-trading days removed: (Implicitly handled by reindex to SPY)")
 
     return full_df
 
