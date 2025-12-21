@@ -8,6 +8,18 @@ DATA_PATH = os.path.join(REPO_ROOT, 'Output', 'final_features_with_target.csv')
 QUALITY_REPORT_PATH = os.path.join(REPO_ROOT, 'Output', 'data_quality_report.csv')
 
 # ===============================
+# Feature Engineering Parameters (Data Rehab)
+# ===============================
+# Rolling windows for stationarity transformations (Z-Scores, Detrending)
+FEAT_Z_SCORE_WINDOW = 252       # 1 year for robust mean/std
+FEAT_SHORT_Z_WINDOW = 126       # 6 months for more reactive signals (e.g. Spreads)
+FEAT_DETREND_WINDOW = 20        # ~1 month for short-term sentiment detrending
+FEAT_ROC_WINDOW = 21            # 1 month for Rate-of-Change calculations
+FEAT_BREADTH_THRUST_WINDOW = 5  # 1 week for breadth momentum
+# Regime Settings
+REGIME_BREADTH_THRESHOLD = 0.5 # 50% stocks above 50MA = Bull
+
+# ===============================
 # Dataset Frequency & Target Configuration
 # ===============================
 # DATA_FREQUENCY: "daily" uses all trading days, "monthly" uses month-end observations
@@ -66,7 +78,7 @@ EMBARGO_ROWS = EMBARGO_ROWS_DAILY if DATA_FREQUENCY == "daily" else EMBARGO_ROWS
 # Model Parameters
 # Options: 'LinearRegression', 'RandomForest', 'XGBoost', 'MLP', 'LSTM', 'CNN', 'Transformer', 'Ridge'
 MODEL_TYPE = 'RegimeGatedHybrid'
-REGIME_COL = 'RV_Ratio'
+REGIME_COL = 'Breadth_Regime'
 REGIME_LOW_MODEL = 'Ridge'
 REGIME_HIGH_MODEL = 'RandomForest'
 BASIC_MODEL_SUITE = ['LinearRegression', 'RandomForest', 'XGBoost', 'MLP']

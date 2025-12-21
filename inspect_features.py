@@ -18,6 +18,10 @@ def run_inspection():
         print(f"Error loading data: {e}")
         return
 
+    print(f"Loaded DataFrame Shape: {df.shape}")
+    print(df.head())
+    print(df.describe())
+
     target_col = config.TARGET_COL
     if target_col not in df.columns:
         print(f"CRITICAL: Target column {target_col} not found.")

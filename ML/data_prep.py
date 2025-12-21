@@ -33,19 +33,20 @@ def get_big_move_threshold():
 
 def load_and_prep_data(keep_price=False):
     """
-    Loads data, creates target, and handles basic cleaning.
+    Loads data, creates target, and implements 'Data Rehab' pipeline.
+    Fixes non-stationary features, drops toxic ones, and adds context.
     
     Args:
-        keep_price (bool): If True, retains SPY_Price column (useful for reporting).
+        keep_price (bool): If True, retains SPY_Price column.
         
     Returns:
-        pd.DataFrame: Data with features and target.
+        pd.DataFrame: Rehabbed dataframe ready for ML.
     """
     print(f"Loading data from {config.DATA_PATH}...")
     df = pd.read_csv(config.DATA_PATH, index_col=0, parse_dates=True)
     df.sort_index(inplace=True)
 
-    # Respect pre-computed targets when provided by the feature pipeline
+    # Respect pre-computed targets
     if config.TARGET_COL in df.columns:
         print(f"Found precomputed target column {config.TARGET_COL}. Using in-place values.")
     elif 'SPY_Price' in df.columns:
@@ -56,82 +57,93 @@ def load_and_prep_data(keep_price=False):
     else:
         raise ValueError("Cannot create target. Missing SPY_Price or Return_1M.")
 
-    # Drop SPY_Price from features unless requested to keep (e.g. for reporting)
-    if not keep_price:
-        if 'SPY_Price' in df.columns:
-            df.drop(columns=['SPY_Price'], inplace=True)
-    
-    # Drop Log_Target_1M - this is a transformed version of the target (LEAKAGE!)
-    if 'Log_Target_1M' in df.columns:
-        print("Dropping Log_Target_1M to prevent target leakage.")
-        df.drop(columns=['Log_Target_1M'], inplace=True)
-
-    # First, drop columns that are ALL NaN (like ISM_PMI if it's empty)
+    # Drop columns that are completely empty before doing anything else
     df.dropna(axis=1, how='all', inplace=True)
 
-    # =========================================================================
-    # Anti-Leakage: NO backward-fill allowed for any features
-    # Only forward-fill explicitly listed macro columns that are "as-of" correct
-    # (i.e., carrying forward the last known observation is legitimate)
-    # =========================================================================
-    initial_rows = len(df)
-    initial_nans = df.isna().sum().sum()
-    
-    # Only allow ffill for explicitly listed macro columns
-    macro_ffill_cols = getattr(config, "MACRO_FFILL_COLS", [])
-    existing_ffill_cols = [c for c in macro_ffill_cols if c in df.columns]
-    
-    if existing_ffill_cols:
-        print(f"[Anti-Leakage] Forward-filling ONLY these macro columns: {existing_ffill_cols}")
-        df[existing_ffill_cols] = df[existing_ffill_cols].ffill()
-    
-    # Remove rows where the target remains undefined (tail after shifting)
-    df.dropna(subset=[config.TARGET_COL], inplace=True)
+    # 1. Toxic Feature Cleanup (Drop verified noise)
+    if 'RV_Ratio' in df.columns:
+        df.drop(columns=['RV_Ratio'], inplace=True)
 
-    # =========================================================================
-    # Drop warmup rows: rolling indicators (MA/RSI/vol/etc.) produce NaNs at start
-    # This is correct - we don't fill these, we just drop rows until features valid
-    # =========================================================================
-    rows_before_drop = len(df)
-    nan_cols_before = df.columns[df.isna().any()].tolist()
-    nan_counts_before = df.isna().sum()
-    nan_counts_before = nan_counts_before[nan_counts_before > 0]
+    # 2. Apply Transformations (Data Rehab)
+    # HY_Spread -> 1-Month Change (Diff)
+    if 'HY_Spread' in df.columns:
+        df['HY_Spread_Diff'] = df['HY_Spread'].diff(config.FEAT_ROC_WINDOW)
     
+    # Yield_Curve -> 1-Month Change (ROC)
+    if 'Yield_Curve' in df.columns:
+        df['Yield_Curve_Chg'] = df['Yield_Curve'].diff(config.FEAT_ROC_WINDOW)
+
+    # Put_Call_Ratio: Dropped due to non-stationarity
+    # if 'Put_Call_Ratio' in df.columns:
+    #    df['PCR_Diff'] = df['Put_Call_Ratio'].diff(config.FEAT_ROC_WINDOW)
+
+    # Macro Trends -> 1-Month Diff or Chg
+    # Check for likely names based on standard datasets or provided instructions
+    # If uncertain, we use safe gets.
+    if 'USD_Trend' in df.columns: # Assuming this exists from feature inspection
+        df['USD_Trend_Chg'] = df['USD_Trend'].diff(config.FEAT_ROC_WINDOW)
+    
+    if 'Oil_Deviation' in df.columns:
+        df['Oil_Deviation_Chg'] = df['Oil_Deviation'].diff(config.FEAT_ROC_WINDOW) 
+        
+    if 'UMich_Sentiment' in df.columns:
+        df['UMich_Sentiment_Chg'] = df['UMich_Sentiment'].pct_change(config.FEAT_ROC_WINDOW)
+
+    # Long Term Returns -> Z-Scores (Fix Random Walk)
+    for term in ['Return_3M', 'Return_6M', 'Return_12M']:
+        if term in df.columns:
+            roll_mean = df[term].rolling(config.FEAT_Z_SCORE_WINDOW).mean()
+            roll_std = df[term].rolling(config.FEAT_Z_SCORE_WINDOW).std()
+            df[f'{term}_Z'] = (df[term] - roll_mean) / (roll_std + 1e-8)
+
+    # 3. Add New Context Features
+    # Month of Year (Seasonality)
+    df['Month_of_Year'] = df.index.month
+
+    # Breadth Thrust (5-day Momentum of Sectors > 50MA)
+    if 'Sectors_Above_50MA' in df.columns:
+        df['Breadth_Thrust'] = df['Sectors_Above_50MA'].diff(config.FEAT_BREADTH_THRUST_WINDOW)
+        
+        # Breadth Regime (Bull/Bear based on market internal strength)
+        # 1 if Breadth > Threshold (e.g. 0.5), else 0
+        df['Breadth_Regime'] = (df['Sectors_Above_50MA'] > config.REGIME_BREADTH_THRESHOLD).astype(int)
+
+    # Create Interaction Features (Crucial for Ridge)
+    if 'Imp_Real_Gap' in df.columns:
+        if 'Return_1M' in df.columns:
+            df['Vol_Trend_Interact'] = df['Imp_Real_Gap'] * df['Return_1M']
+        if 'Breadth_Thrust' in df.columns:
+            df['Breadth_Vol_Interact'] = df['Breadth_Thrust'] * df['Imp_Real_Gap']
+
+    # 4. Safety Check: Drop original non-stationary raw columns AND Lag-Inducing Features
+    drop_cols = [
+        'HY_Spread', 'Yield_Curve', 'Put_Call_Ratio', 
+        'USD_Trend', 'Oil_Deviation', 'UMich_Sentiment',
+        'Return_3M', 'Return_6M', 'Return_12M',
+        'Return_3M_Z', 'Return_6M_Z', 'Return_12M_Z', # Drop Lag-Inducing Z-scores
+    ]
+    # Also drop SPY_Price unless requested
+    if not keep_price and 'SPY_Price' in df.columns:
+        drop_cols.append('SPY_Price')
+        
+    # Drop Log_Target_1M if present (Leakage)
+    if 'Log_Target_1M' in df.columns:
+        drop_cols.append('Log_Target_1M')
+
+    # Drop only what exists
+    existing_drops = [c for c in drop_cols if c in df.columns]
+    if existing_drops:
+        df.drop(columns=existing_drops, inplace=True)
+
+    # Sanity Check: Replace infinite values
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    # Drop cleanup (NaNs from rolling windows)
+    # 252 days is the max window used (Z-Scores), so we expect ~1 year dropout
+    initial_len = len(df)
     df.dropna(inplace=True)
+    print(f"Data Rehab Complete. Dropped {initial_len - len(df)} warmup rows. Final shape: {df.shape}")
     
-    rows_dropped = rows_before_drop - len(df)
-    first_valid_date = df.index.min() if len(df) > 0 else None
-    
-    # Log detailed information about what was dropped
-    print(f"\n[Anti-Leakage] NaN Handling Summary:")
-    print(f"  Initial rows: {initial_rows}, Initial total NaNs: {initial_nans}")
-    print(f"  Rows before final dropna: {rows_before_drop}")
-    print(f"  Rows dropped (warmup + remaining NaNs): {rows_dropped}")
-    print(f"  Final rows: {len(df)}")
-    print(f"  First valid date: {first_valid_date}")
-    if len(nan_counts_before) > 0:
-        print(f"  Columns with NaNs before drop: {nan_counts_before.to_dict()}")
-
-    # --- Create Big Move Labels ---
-    # These are derived purely from Target_1M (which is already shifted forward),
-    # so no additional lookahead is introduced.
-    big_move_thresh = get_big_move_threshold()
-    y = df[config.TARGET_COL]
-    
-    df["BigMove"] = (y.abs() > big_move_thresh).astype(int)
-    df["BigMoveUp"] = (y > big_move_thresh).astype(int)
-    df["BigMoveDown"] = (y < -big_move_thresh).astype(int)
-    
-    # Log big move statistics
-    n_big_move = df["BigMove"].sum()
-    n_big_up = df["BigMoveUp"].sum()
-    n_big_down = df["BigMoveDown"].sum()
-    pct_big_move = 100.0 * n_big_move / len(df)
-    print(f"Big Move Labels (threshold={big_move_thresh:.1%}):")
-    print(f"  Total BigMoves: {n_big_move} ({pct_big_move:.1f}% of data)")
-    print(f"  BigMoveUp: {n_big_up}, BigMoveDown: {n_big_down}")
-
-    print(f"Data loaded: {len(df)} rows. Columns: {len(df.columns)}")
     return df
 
 def validate_embargo(train_idx, val_idx, test_idx, embargo_rows, target_horizon, df_index=None):
