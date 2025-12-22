@@ -602,6 +602,11 @@ class ExperimentLogger:
             'execution_config': {
                 'execution_frequency': config_dict.get('EXECUTION_FREQUENCY'),
             },
+            'regime_config': {
+                'regime_col': config_dict.get('REGIME_COL'),
+                'regime_low_model': config_dict.get('REGIME_LOW_MODEL'),
+                'regime_high_model': config_dict.get('REGIME_HIGH_MODEL'),
+            },
             'hyperparameters': {}
         }
         

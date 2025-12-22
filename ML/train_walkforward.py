@@ -115,6 +115,22 @@ def main():
     threshold_tuning_results = []  # Store per-fold threshold tuning results
     
     print(f"Model: {config.MODEL_TYPE}")
+    
+    # Check for Regime-Gated Configuration
+    if config.MODEL_TYPE.startswith("RegimeGated"):
+        regime_col = getattr(config, 'REGIME_COL', 'RV_Ratio')
+        print(f"Regime Column: {regime_col}")
+        
+        # Verify regime column exists
+        if regime_col not in df.columns:
+            raise ValueError(f"CRITICAL ERROR: Regime column '{regime_col}' not found in dataset. Available columns: {df.columns.tolist()}")
+            
+        if config.MODEL_TYPE == 'RegimeGatedHybrid':
+            low_model = getattr(config, 'REGIME_LOW_MODEL', 'Ridge')
+            high_model = getattr(config, 'REGIME_HIGH_MODEL', 'RandomForest')
+            print(f"Regime Low Vol Model: {low_model}")
+            print(f"Regime High Vol Model: {high_model}")
+            
     if config.WF_TUNE_THRESHOLD:
         print(f"Threshold Tuning: ENABLED (criterion={config.WF_THRESHOLD_CRITERION}, grid_points={config.WF_THRESHOLD_N_GRID})")
     print(f"Rolling Train Window: {config.TRAIN_WINDOW_YEARS} years")

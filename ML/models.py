@@ -113,18 +113,27 @@ class ModelFactory:
 
         elif model_type == 'RegimeGatedRidge':
             # Regime-gated Ridge regression
-            params = {'alpha': 1.0, 'regime_col': 'RV_Ratio'}
+            # Explicitly pass regime_col from config if not in overrides
+            params = {'alpha': 1.0}
+            if 'regime_col' not in overrides:
+                params['regime_col'] = getattr(config, 'REGIME_COL', 'RV_Ratio')
+            
             params.update({k: v for k, v in overrides.items() if k in ['alpha', 'regime_col', 'fit_intercept', 'copy_X', 'max_iter', 'tol', 'solver', 'positive', 'random_state']})
             return RegimeGatedRidge(**params)
 
         elif model_type == 'RegimeGatedHybrid':
-            # Hybrid Regime-gated model (e.g. Ridge + RF)
+            # Hybrid Regime-gated model
             params = {}
             for k, v in overrides.items():
                 params[k] = v
-            # Extract sub-model types from config if not in overrides
+                
+            # Explicitly extract or default from config using the correct config keys
+            if 'regime_col' not in params:
+                params['regime_col'] = getattr(config, 'REGIME_COL', 'RV_Ratio')
+                
             low_model = params.pop('low_model', getattr(config, 'REGIME_LOW_MODEL', 'Ridge'))
             high_model = params.pop('high_model', getattr(config, 'REGIME_HIGH_MODEL', 'RandomForest'))
+            
             return RegimeGatedHybrid(low_model=low_model, high_model=high_model, **params)
 
         elif model_type == 'TrendGatedHybrid':
@@ -134,7 +143,9 @@ class ModelFactory:
             raise ValueError(f"Unknown model type: {model_type}")
 
 class RegimeGatedRidge:
-    def __init__(self, alpha=1.0, regime_col='RV_Ratio', **kwargs):
+    def __init__(self, alpha=1.0, regime_col=None, **kwargs):
+        if regime_col is None:
+            raise ValueError("RegimeGatedRidge requires a 'regime_col' parameter.")
         self.alpha = alpha
         self.regime_col = regime_col
         self.kwargs = kwargs
@@ -195,7 +206,10 @@ class RegimeGatedRidge:
         return y_pred
 
 class RegimeGatedHybrid:
-    def __init__(self, low_model='Ridge', high_model='RandomForest', regime_col='RV_Ratio', **kwargs):
+    def __init__(self, low_model, high_model, regime_col=None, **kwargs):
+        if regime_col is None:
+            raise ValueError("RegimeGatedHybrid requires a 'regime_col' parameter.")
+            
         self.low_model_type = low_model
         self.high_model_type = high_model
         self.regime_col = regime_col
