@@ -20,9 +20,9 @@ def rehab_features(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         pd.DataFrame: Rehabbed DataFrame.
     """
-    initial_cols = len(df.columns)
+    initial_cols = df.columns.tolist()
     initial_rows = len(df)
-    print(f"[Data Rehab] Starting rehab on {initial_rows} rows, {initial_cols} columns...")
+    print(f"[Data Rehab] Starting rehab on {initial_rows} rows, {len(initial_cols)} columns...")
     
     # Work on a copy to avoid side effects
     df = df.copy()
@@ -58,8 +58,9 @@ def rehab_features(df: pd.DataFrame) -> pd.DataFrame:
             df[f'{term}_Z'] = (df[term] - roll_mean) / (roll_std + 1e-8)
 
     # 3. Add New Context Features
-    # Month of Year (Seasonality)
-    df['Month_of_Year'] = df.index.month
+    # Month of Year (Cyclical Encoding: Sin/Cos)
+    df['Month_Sin'] = np.sin(2 * np.pi * df.index.month / 12)
+    df['Month_Cos'] = np.cos(2 * np.pi * df.index.month / 12)
 
     # Breadth Thrust (5-day Momentum of Sectors > 50MA)
     if 'Sectors_Above_50MA' in df.columns:
@@ -80,7 +81,7 @@ def rehab_features(df: pd.DataFrame) -> pd.DataFrame:
         'HY_Spread', 'Yield_Curve', 'Put_Call_Ratio', 
         'USD_Trend', 'Oil_Deviation', 'UMich_Sentiment',
         'Return_3M', 'Return_6M', 'Return_12M',
-        'Return_3M_Z', 'Return_6M_Z', 'Return_12M_Z', # Drop Lag-Inducing Z-scores
+        # 'Return_*_Z' retained as stationary state variables
     ]
     
     # Drop Log_Target_1M if present (Leakage)
@@ -105,9 +106,16 @@ def rehab_features(df: pd.DataFrame) -> pd.DataFrame:
     feature_names = sorted(df.columns.tolist())
     cols_hash = hashlib.md5("".join(feature_names).encode()).hexdigest()[:8]
 
+    # Calculate added and dropped columns for transparency
+    final_cols = df.columns.tolist()
+    added_cols = sorted(list(set(final_cols) - set(initial_cols)))
+    dropped_cols = sorted(list(set(initial_cols) - set(final_cols)))
+
     print(f"[Data Rehab] Complete.")
     print(f"  Rows dropped (warmup): {rows_dropped}")
     print(f"  Final Shape: {df.shape}")
     print(f"  Feature Hash: {cols_hash}")
+    print(f"  Added Columns: {added_cols}")
+    print(f"  Dropped Columns: {dropped_cols}")
     
     return df

@@ -149,6 +149,11 @@ class BacktestEngine:
             for section, text in self.report_context.items():
                 md += f"## {section}\n"
                 md += f"{text}\n\n"
+
+        # --- Stack Decomposition (If available in context) ---
+        if self.report_context and "Stack Decomposition" in self.report_context:
+            md += "## Stack Decomposition Analysis\n"
+            md += self.report_context["Stack Decomposition"] + "\n\n"
                 
         # --- Strategy Explanations ---
         md += "## Appendix: Strategy Definitions\n"

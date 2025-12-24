@@ -40,6 +40,12 @@ def build_daily_features(data_path=None):
     df = pd.read_csv(data_path, index_col=0, parse_dates=True)
     df.sort_index(inplace=True)
     
+    # Filter out weekends explicitly
+    initial_rows_raw = len(df)
+    df = df[df.index.weekday < 5]
+    if len(df) < initial_rows_raw:
+        print(f"[DatasetBuilder] Dropped {initial_rows_raw - len(df)} weekend rows")
+    
     # Preserve SPY_Price for target creation before any processing
     if 'SPY_Price' not in df.columns:
         raise ValueError("SPY_Price column required for target creation")

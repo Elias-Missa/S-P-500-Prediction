@@ -2,7 +2,7 @@ import os
 
 import pandas as pd
 
-from ML import config, data_prep, models, tuning
+from ML import config, data_prep, models, tuning, feature_selection
 from ML.train import evaluate, resolve_model_params
 
 
@@ -26,8 +26,8 @@ def run_benchmark():
     train_idx, val_idx, test_idx = splitter.get_split(df)
 
     target_col = config.TARGET_COL
-    exclude_cols = [target_col, 'BigMove', 'BigMoveUp', 'BigMoveDown']
-    feature_cols = [c for c in df.columns if c not in exclude_cols]
+    # Centralized feature selection
+    feature_cols = feature_selection.select_feature_columns(df)
 
     X_train, y_train = df.loc[train_idx, feature_cols], df.loc[train_idx, target_col]
     X_val, y_val = df.loc[val_idx, feature_cols], df.loc[val_idx, target_col]

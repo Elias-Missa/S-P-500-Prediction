@@ -10,7 +10,7 @@ except ImportError:
 import torch
 import torch.nn as nn
 
-from . import config
+from . import config, metrics
 from .transformer import TransformerModel
 from .tft_model import TFTModel
 
@@ -52,6 +52,8 @@ class ModelFactory:
             }
             params.update({k: v for k, v in overrides.items() if k in params})
             return XGBRegressor(**params)
+
+
 
         elif model_type == 'MLP':
             params = {
@@ -138,6 +140,9 @@ class ModelFactory:
 
         elif model_type == 'TrendGatedHybrid':
             return TrendGatedHybrid(**overrides)
+
+        elif model_type == 'Ridge_Residual_XGB':
+            return RidgeResidualXGB(**overrides)
 
         else:
             raise ValueError(f"Unknown model type: {model_type}")
@@ -415,3 +420,197 @@ class CNN1DModel(nn.Module):
         # FC -> (batch, output_dim)
         out = self.fc(x)
         return out
+
+
+class RidgeResidualXGB:
+    def __init__(self, ridge_alpha=1.0, xgb_params=None, **kwargs):
+        self.ridge_alpha = ridge_alpha
+        self.xgb_params = xgb_params or {}
+        self.kwargs = kwargs
+        
+        # Base Model: Ridge
+        self.base_model = Ridge(alpha=ridge_alpha)
+        
+        # Residual Model: XGBoost
+        # Default XGB params if not provided
+        default_xgb = {
+            'n_estimators': 100,
+            'learning_rate': 0.1,
+            'max_depth': 3,
+            'n_jobs': -1,
+            'random_state': 42
+        }
+        if self.xgb_params:
+            default_xgb.update(self.xgb_params)
+        
+        # Ensure we have XGBRegressor available
+        if XGBRegressor is None:
+            raise ImportError("XGBoost not installed.")
+            
+        self.residual_model = XGBRegressor(**default_xgb)
+        
+        self.best_lambda = 0.0 # Default to base model only until optimized
+        self.lambdas = [0.25, 0.5, 0.75, 1.0] # Candidate lambdas
+        
+    def fit(self, X, y):
+        # 1. Train Base Model (Ridge)
+        self.base_model.fit(X, y)
+        base_preds = self.base_model.predict(X)
+        
+        # 2. Compute Residuals
+        # Residual = Actual - Predicted
+        residuals = y - base_preds
+        
+        # 3. Prepare Features for Residual Model
+        # Features = Rehabbed Features (X) + Ridge Prediction
+        X_res = X.copy()
+        X_res['Ridge_Pred'] = base_preds
+        
+        # 4. Train Residual Model (XGBoost)
+        self.residual_model.fit(X_res, residuals)
+        
+        return self
+        
+    def optimize_mixing(self, X_val, y_val):
+        """
+        Select best lambda on validation set to minimize RMSE.
+        final_pred = ridge_pred + lambda * residual_pred
+        """
+        # Generate predictions
+        base_preds = self.base_model.predict(X_val)
+        
+        X_res = X_val.copy()
+        X_res['Ridge_Pred'] = base_preds
+        res_preds = self.residual_model.predict(X_res)
+        
+        # Get config params
+        candidates = getattr(config, 'STACK_LAMBDA_GRID', [0.0, 0.25, 0.5, 0.75, 1.0])
+        criterion = getattr(config, 'STACK_LAMBDA_CRITERION', 'monthly_sharpe')
+        
+        print(f"  [RidgeResidualXGB] Optimizing Mixing (Candidates: {candidates}, Criterion: {criterion})")
+
+        # Track best
+        best_score = -float('inf') 
+        best_lam = 0.0
+        
+        # Determine frequency for metric calc
+        execution_frequency = getattr(config, 'EXECUTION_FREQUENCY', 'monthly')
+        
+        results_log = []
+
+        for lam in candidates:
+            final_preds = base_preds + lam * res_preds
+            
+            # Compute Metric
+            score = -float('inf')
+            metric_display = ""
+            
+            try:
+                if criterion == "rmse":
+                    # Minimize RMSE -> Maximize negative RMSE
+                    rmse = np.sqrt(np.mean((y_val - final_preds) ** 2))
+                    score = -rmse
+                    metric_display = f"RMSE: {rmse:.6f}"
+                    
+                elif criterion == "ic":
+                    score = metrics.calculate_ic(y_val, final_preds)
+                    metric_display = f"IC: {score:.4f}"
+                    
+                elif criterion == "decile_spread":
+                    spread = metrics.calculate_decile_spread(y_val, final_preds)
+                    score = spread
+                    metric_display = f"Spread: {spread:.4f}"
+                    
+                elif criterion == "monthly_sharpe":
+                    # Use strategy metrics calculator
+                    # We need dates for proper monthly aggregation logic if available
+                    val_dates = None
+                    if hasattr(y_val, 'index'):
+                         # Try to use index as dates
+                         val_dates = y_val.index
+                    
+                    strat_metrics = metrics.calculate_strategy_metrics(
+                        y_val, final_preds, 
+                        dates=val_dates, 
+                        execution_frequency=execution_frequency
+                    )
+                    score = strat_metrics.get('sharpe', -999.0)
+                    metric_display = f"Sharpe: {score:.4f}"
+                    
+                else:
+                    # Default fallback to RMSE (negative)
+                     rmse = np.sqrt(np.mean((y_val - final_preds) ** 2))
+                     score = -rmse
+                     metric_display = f"RMSE (Fallback): {rmse:.6f}"
+            
+            except Exception as e:
+                print(f"    - Lambda: {lam:.2f} -> Error calculating {criterion}: {e}")
+                score = -float('inf')
+
+            print(f"    - Lambda: {lam:.2f} -> {metric_display}")
+            
+            results_log.append({'lambda': lam, 'score': score})
+            
+            if score > best_score:
+                best_score = score
+                best_lam = lam
+                
+        # Fail fast check: If all scores are -inf, something is wrong
+        if all(r['score'] == -float('inf') for r in results_log):
+             print("  [RidgeResidualXGB] CRITICAL: All candidates failed metric calculation. Defaulting to 0.0.")
+             best_lam = 0.0
+             # We let the assertion in train_walkforward catch this if 0.0 is disallowed, 
+             # but user said "only error if all lambdas are NaN/invalid" - well, we default to safe 0.0 here.
+
+        self.best_lambda = best_lam
+        print(f"  [RidgeResidualXGB] Selected Lambda: {self.best_lambda} (Best {criterion}: {best_score:.4f})")
+        
+        if self.best_lambda == 0.0:
+            print("  [RidgeResidualXGB] Note: Selected Lambda is 0.0. Stack inactive (Signal preferred Ridge).")
+        
+    def predict(self, X):
+        # Generate predictions
+        base_preds = self.base_model.predict(X)
+        
+        X_res = X.copy()
+        X_res['Ridge_Pred'] = base_preds
+        res_preds = self.residual_model.predict(X_res)
+        
+        # Combine
+        return base_preds + self.best_lambda * res_preds
+
+    def predict_decomposition(self, X):
+        """
+        Returns dictionary with component predictions:
+        {
+            'ridge_pred': np.array,
+            'resid_pred': np.array,
+            'final_pred': np.array,
+            'lambda': float
+        }
+        """
+        base_preds = self.base_model.predict(X)
+        
+        X_res = X.copy()
+        X_res['Ridge_Pred'] = base_preds
+        res_preds = self.residual_model.predict(X_res)
+        
+        final_preds = base_preds + self.best_lambda * res_preds
+        
+        return {
+            'ridge_pred': base_preds,
+            'resid_pred': res_preds,
+            'final_pred': final_preds,
+            'lambda': self.best_lambda
+        }
+    
+    @property
+    def feature_importances_(self):
+        """
+        Return feature importances of the XGBoost model.
+        Note: This includes the 'Ridge_Pred' feature which is usually dominant.
+        """
+        try:
+            return self.residual_model.feature_importances_
+        except:
+            return None

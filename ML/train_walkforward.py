@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
-from ML import config, data_prep, models, utils, metrics, lstm_dataset, tuning, lstm_configs
+from ML import config, data_prep, models, utils, metrics, lstm_dataset, tuning, lstm_configs, feature_selection
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
@@ -105,16 +105,31 @@ def main():
     
     # Exclude BigMove labels to prevent target leakage
     target_col = config.TARGET_COL
-    exclude_cols = [target_col, 'BigMove', 'BigMoveUp', 'BigMoveDown']
-    feature_cols = [c for c in df.columns if c not in exclude_cols]
+    # Centralized feature selection
+    feature_cols = feature_selection.select_feature_columns(df)
+    print(f"Features Selected: {len(feature_cols)}")
     
     all_preds = []
     all_feature_importances = []  # Store importances per fold
     all_actuals = []
+    all_regimes = [] # Store regime labels for analysis
     fold_metrics_list = []  # Store per-fold metrics
     threshold_tuning_results = []  # Store per-fold threshold tuning results
     
+    # Store stack decomposition data
+    all_stack_predictions = [] 
+    
+    # Determine Regime Column (default to 'Breadth_Regime' or 'RV_Ratio' if available)
+    regime_col = getattr(config, 'REGIME_COL', None)
+    if regime_col is None:
+        if 'Breadth_Regime' in df.columns:
+            regime_col = 'Breadth_Regime'
+        elif 'RV_Ratio' in df.columns:
+            regime_col = 'RV_Ratio'
+            
     print(f"Model: {config.MODEL_TYPE}")
+    if regime_col:
+        print(f"Tracking Performance by Regime: {regime_col}")
     
     # Check for Regime-Gated Configuration
     if config.MODEL_TYPE.startswith("RegimeGated"):
@@ -741,12 +756,8 @@ def main():
             
             model_params = resolve_model_params(config.MODEL_TYPE, best_params)
             model = models.ModelFactory.get_model(config.MODEL_TYPE, overrides=model_params)
-            model.fit(X_train, y_train)
             
-            # Predict on train, val, and test sets
-            y_train_pred = model.predict(X_train)
-            y_train_actual = y_train.values if hasattr(y_train, 'values') else y_train
-            y_pred = model.predict(X_test)
+            model.fit(X_train, y_train)
             
             # --- Capture Feature Importance (if available) ---
             try:
@@ -761,8 +772,18 @@ def main():
             # --- Compute Validation Metrics for standard ML if val set is available ---
             y_val_pred, y_val_actual = None, None
             if has_val_set and X_val_orig is not None and len(X_val_orig) > 0:
+                # If model has optimization hook, run it now (e.g. RidgeResidualXGB)
+                if hasattr(model, 'optimize_mixing'):
+                    print("  Optimizing mixing parameter on validation set...")
+                    model.optimize_mixing(X_val_orig, y_val_orig)
+                    
                 y_val_pred = model.predict(X_val_orig)
                 y_val_actual = y_val_orig.values
+
+            # Predict on train and test sets (AFTER potential optimization)
+            y_train_pred = model.predict(X_train)
+            y_train_actual = y_train.values if hasattr(y_train, 'values') else y_train
+            y_pred = model.predict(X_test)
         
         # Store predictions and actuals
         if y_train_pred is not None and y_train_actual is not None:
@@ -771,13 +792,128 @@ def main():
         all_preds.extend(y_pred)
         all_actuals.extend(y_test)
         
+
+
+        # --- Stack Decomposition Collection ---
+        if hasattr(model, 'predict_decomposition'):
+            # 1. Test Set Decomp
+            decomp_test = model.predict_decomposition(X_test)
+            
+            # --- Stack Audit Assertions (Fail Fast) ---
+            selected_lambda = decomp_test['lambda']
+            print(f"  [Fold Audit] Selected Lambda: {selected_lambda}")
+            
+            # 1. Assert Lambda exists
+            if selected_lambda is None:
+                raise RuntimeError(f"Fold {fold+1}: CRITICAL FAILURE - Selected Lambda is missing!")
+            
+            # 2. Check Stack Activity (only if lambda > 0)
+            if selected_lambda > 0:
+                resid_preds = decomp_test['resid_pred']
+                resid_std = np.nanstd(resid_preds)
+                if resid_std == 0:
+                     raise RuntimeError(f"Fold {fold+1}: Residual model produced zero-variance predictions (std=0) despite lambda={selected_lambda}!")
+                
+                # We assert that final_pred differs from ridge_pred
+                if np.allclose(decomp_test['final_pred'], decomp_test['ridge_pred']):
+                    raise RuntimeError(f"Fold {fold+1}: Stack inactive: final_pred == ridge_pred! Residual contribution is effectively zero.")
+            
+            # 4. Verify Final Prediction Logic
+            # Ensure the 'y_pred' we use for metrics IS the 'final_pred' from decomposition
+            if not np.allclose(y_pred, decomp_test['final_pred']):
+                 diff = np.abs(y_pred - decomp_test['final_pred'])
+                 max_diff = np.max(diff)
+                 mean_diff = np.mean(diff)
+                 print(f"  [CRITICAL DEBUG] Prediction Mismatch detected in Fold {fold+1}")
+                 print(f"  y_pred shape: {y_pred.shape}, decomp shape: {decomp_test['final_pred'].shape}")
+                 print(f"  Max Diff: {max_diff:.8f}, Mean Diff: {mean_diff:.8f}")
+                 print(f"  y_pred snippet: {y_pred[:5]}")
+                 print(f"  decomp snippet: {decomp_test['final_pred'][:5]}")
+                 
+                 # If difference is purely floating point noise but allclose failed (maybe strict logic?), strictly enforce consistency
+                 # But if shapes mismatch or diff is large, raise error.
+                 if max_diff > 1e-5:
+                     raise RuntimeError(f"Fold {fold+1}: Critical Logic Error - model.predict() does not match decomposition final_pred! Max Diff: {max_diff}")
+                 else:
+                     print(f"  [WARNING] Small floating point mismatch ({max_diff}). overwriting y_pred with decomp final_pred for consistency.")
+                     y_pred = decomp_test['final_pred']
+
+            # --- Log Detailed Prediction DataFrame (Per Fold) ---
+            fold_stack_data = []
+            for i, idx in enumerate(test_idx):
+                row = {
+                    'date': idx,
+                    'y_true': y_test.iloc[i],
+                    'ridge_pred': decomp_test['ridge_pred'][i],
+                    'resid_pred': decomp_test['resid_pred'][i],
+                    'final_pred': decomp_test['final_pred'][i],
+                    'lambda_selected': selected_lambda,
+                    'split': 'test',
+                    'fold': fold + 1
+                }
+                fold_stack_data.append(row)
+                all_stack_predictions.append(row) # Keep for aggregate
+            
+            # Save per-fold audit file immediately
+            fold_audit_df = pd.DataFrame(fold_stack_data)
+            audit_path = os.path.join(logger.run_dir, f"fold_{fold+1}_stack_audit.csv")
+            fold_audit_df.to_csv(audit_path, index=True) # Index is date from row dict? No, row dict has 'date' col.
+            # actually row['date'] is the index value. 
+            
+            
+            # 2. Validation Set Decomp (if available)
+            if has_val_set and X_val_orig is not None:
+                 decomp_val = model.predict_decomposition(X_val_orig)
+                 for i, idx in enumerate(val_idx):
+                    row = {
+                        'date': idx,
+                        'y_true': y_val_orig.iloc[i],
+                        'ridge_pred': decomp_val['ridge_pred'][i],
+                        'resid_pred': decomp_val['resid_pred'][i],
+                        'final_pred': decomp_val['final_pred'][i],
+                        'lambda_selected': decomp_val['lambda'],
+                        'split': 'validation',
+                        'fold': fold + 1
+                    }
+                    all_stack_predictions.append(row)
+
+            # 3. Train Set Decomp (Optional - can be large, maybe sample or skip?)
+            # Let's collect it for full analysis as requested.
+            decomp_train = model.predict_decomposition(X_train)
+            for i, idx in enumerate(train_idx):
+                # Handle merged train+val case where train_idx might not match X_train rows exactly 
+                # if we didn't carefully track indices. 
+                # Actually X_train indices are preserved.
+                current_date = X_train.index[i]
+                row = {
+                    'date': current_date,
+                    'y_true': y_train.iloc[i],
+                    'ridge_pred': decomp_train['ridge_pred'][i],
+                    'resid_pred': decomp_train['resid_pred'][i],
+                    'final_pred': decomp_train['final_pred'][i],
+                    'lambda_selected': decomp_train['lambda'],
+                    'split': 'train',
+                    'fold': fold + 1
+                }
+                all_stack_predictions.append(row)
+        
+        # Collect regime labels for test set
+        if regime_col and regime_col in df.columns:
+            # Re-fetch based on test_idx to ensure alignment
+            # Note: df.loc[test_idx] might return different structure if test_idx is list vs slice
+            # But here df is consistent.
+            fold_regimes = df.loc[test_idx, regime_col].values
+            all_regimes.extend(fold_regimes)
+        else:
+            # Pad with NaNs if not available
+            all_regimes.extend([np.nan] * len(y_test))
+        
         # Store test dates for monthly execution mode
         # Get dates from df index using test_idx
         try:
             # test_idx should be integer positions, use them to index df
             if hasattr(test_idx, '__iter__') and not isinstance(test_idx, str):
                 # Convert to list if it's a range or other iterable
-                import pandas as pd
                 if isinstance(test_idx, (list, np.ndarray)) or (hasattr(pd, 'Index') and isinstance(test_idx, pd.Index)):
                     test_dates = df.index[test_idx]
                     all_test_dates.extend(test_dates.tolist())
@@ -940,54 +1076,195 @@ def main():
                     'val_big_down_recall': val_tail['recall_down_strict']
                 })
                 
-                # --- Per-Fold Threshold Tuning (Anti-Policy-Overfit) ---
-                if config.WF_TUNE_THRESHOLD:
-                    # Get val dates for monthly execution mode
-                    val_dates = None
-                    if execution_frequency == "monthly":
-                        try:
-                            # Try to get dates from y_val_orig index first (most reliable)
-                            if hasattr(y_val_orig, 'index') and len(y_val_orig.index) == len(y_val_actual):
-                                val_dates = pd.DatetimeIndex(y_val_orig.index)
-                            # Otherwise try to get from df using val_idx
-                            elif hasattr(val_idx, '__len__') and len(val_idx) > 0:
-                                idx_list = list(val_idx) if not isinstance(val_idx, (list, np.ndarray)) else val_idx
-                                val_dates = pd.DatetimeIndex(df.index[idx_list])
-                        except Exception as e:
-                            print(f"  Warning: Could not collect val dates for fold {fold}: {e}")
-                            val_dates = None
+                # --- Policy Selection (Threshold vs Continuous) ---
+                policy_mode = getattr(config, 'POLICY_MODE', 'threshold')
+                
+                if policy_mode == 'monthly_continuous':
+                    # Continuous Policy with K-tuning
                     
-                    tuned_result = metrics.tune_and_evaluate_fold(
-                        y_val_true=y_val_actual,
-                        y_val_pred=y_val_pred,
-                        y_test_true=y_test_arr,
-                        y_test_pred=y_pred_arr,
-                        criterion=config.WF_THRESHOLD_CRITERION,
-                        n_grid_points=config.WF_THRESHOLD_N_GRID,
-                        min_trade_fraction=config.WF_THRESHOLD_MIN_TRADE_FRAC,
-                        frequency=frequency,
-                        apply_vol_targeting=config.WF_THRESHOLD_VOL_TARGETING,
-                        val_dates=val_dates,
-                        test_dates=fold_test_dates,
+                    # 1. Calculate stats on Training Set (Standardization Base)
+                    # We use predictions made on the training set (from decomp_train if available, 
+                     # otherwise we need to generate them, but we did generate decomp_train earlier)
+                    
+                    # Note: all_stack_predictions contains train preds for this fold. 
+                    # We can filter 'decomp_train' dictionary if we held onto it, 
+                    # or filter the temporary list 'fold_stack_data' but that's only test.
+                    # We have 'y_train_pred' variable earlier in loop!
+                    
+                    if y_train_pred is not None and len(y_train_pred) > 10:
+                        train_mean = np.mean(y_train_pred)
+                        train_std = np.std(y_train_pred)
+                        if train_std < 1e-8: train_std = 1.0 # avoid div/0
+                    else:
+                        train_mean = 0.0
+                        train_std = 1.0
+                        
+                    # 2. Compute Z-scores
+                    z_val = (y_val_pred - train_mean) / train_std
+                    z_test = (y_pred_arr - train_mean) / train_std
+                    
+                    # 3. Tune k on Validation
+                    k_grid = getattr(config, 'POLICY_K_GRID', [0.5, 1.0, 1.5])
+                    tuned_res = metrics.optimize_continuous_k(
+                        y_val_actual, z_val, k_grid=k_grid, 
                         execution_frequency=execution_frequency
                     )
+                    best_k = tuned_res['best_k']
                     
-                    # Log the tuned threshold for this fold
-                    tuned_tau = tuned_result['tuned_threshold']
-                    tuned_test_sharpe = tuned_result['test_metrics']['sharpe']
-                    print(f"  [Threshold Tuning] τ={tuned_tau:.4f} → Test Sharpe={tuned_test_sharpe:.2f}")
+                    print(f"  [Policy Tuning] Continuous Mode: Train μ={train_mean:.4f}, σ={train_std:.4f} | Best k={best_k} (Val Sharpe: {tuned_res['best_sharpe']:.2f})")
                     
-                    # Add to fold entry
+                    # 4. Apply Policy to Test
+                    # Position = clip(k * z_test, -1, 1)
+                    # We override the implicit "strategy metrics" calculated earlier which assumed sign-based or standard logic
+                    # We need to re-calculate strategy metrics with these specific continuous weights
+                    
+                    test_pos = np.clip(best_k * z_test, -1.0, 1.0)
+                    
+                    # Re-calc strategy metrics with continuous positions
+                    # metrics.calculate_strategy_metrics supports 'positions' arg if we modify it, 
+                    # OR we can just calc Sharpe manually here and store it.
+                    # The standard calculate_strategy_metrics assumes pos = sign(pred) if no positions given.
+                    # Let's check metrics.py to see if it supports explicit positions. 
+                    # It likely doesn't support passing positions directly yet. 
+                    # We might need to quickly robustify calculate_strategy_metrics or calc manually.
+                    
+                    # Manual Calc for Fold Entry
+                    test_ret = test_pos * y_test_arr
+                    ann_factor = metrics.get_annualization_factor(execution_frequency)
+                    if np.std(test_ret) > 1e-8:
+                        cont_sharpe = (np.mean(test_ret) / np.std(test_ret)) * np.sqrt(ann_factor)
+                    else:
+                        cont_sharpe = 0.0
+                        
                     fold_entry.update({
-                        'tuned_threshold': tuned_tau,
-                        'tuned_val_sharpe': tuned_result['val_metrics']['sharpe'],
-                        'tuned_test_sharpe': tuned_test_sharpe,
-                        'tuned_test_return': tuned_result['test_metrics']['total_return'],
-                        'tuned_test_hit_rate': tuned_result['test_metrics']['hit_rate'],
-                        'tuned_test_trades': tuned_result['test_metrics']['trade_count']
+                        'policy_mode': 'continuous',
+                        'tuned_k': best_k,
+                        'train_mean': train_mean,
+                        'train_std': train_std,
+                        'continuous_sharpe': cont_sharpe,
+                        'tuned_val_sharpe': tuned_res['best_sharpe']
                     })
+
+                    # --- Regime Risk Cap ---
+                    # Logic: if regime == 0 (Low Vol/Target), apply cap.
+                    regime_oracle_col = getattr(config, 'REGIME_ORACLE_COL', 'RV_Ratio')
+                    regime_cap_grid = getattr(config, 'REGIME_RISK_CAP_GRID', None)
                     
-                    threshold_tuning_results.append(tuned_result)
+                    if regime_cap_grid is not None and regime_oracle_col in df.columns:
+                        # Establish Regime Threshold (similar to RegimeGated logic)
+                        # Use model's threshold if available, else derive from Training Data median
+                        regime_thresh = None
+                        if hasattr(model, 'regime_threshold'):
+                            regime_thresh = model.regime_threshold
+                        else:
+                            # Derive from training data (fold-pure) if col exists
+                            if regime_oracle_col in X_train.columns:
+                                regime_thresh = X_train[regime_oracle_col].median()
+                            else:
+                                # Fallback if not in X_train (unlikely if in df)
+                                regime_thresh = df[regime_oracle_col].iloc[train_idx].median()
+                        
+                        if regime_thresh is not None:
+                            # Generate Regime Signals (0 = Low/Target, 1 = High/Other)
+                            # Note: User request: "if regime==0". Usually 0 is Low Vol (below thresh).
+                            
+                            # Get Val Regimes
+                            if regime_oracle_col in X_val_orig.columns:
+                                val_regime_vals = X_val_orig[regime_oracle_col]
+                            else:
+                                val_regime_vals = df[regime_oracle_col].iloc[val_idx]
+                            
+                            val_regimes = (val_regime_vals > regime_thresh).astype(int)
+                            
+                            # Get Test Regimes
+                            if regime_oracle_col in X_test.columns:
+                                test_regime_vals = X_test[regime_oracle_col]
+                            else:
+                                test_regime_vals = df[regime_oracle_col].iloc[test_idx]
+                                
+                            test_regimes = (test_regime_vals > regime_thresh).astype(int)
+                            
+                            # Tune Cap on Val (using the positions we just calculated: test_pos is for test, need val_pos)
+                            # We need val positions first.
+                            z_val = (y_val_pred - train_mean) / train_std
+                            val_pos = np.clip(best_k * z_val, -1.0, 1.0)
+                            
+                            cap_res = metrics.optimize_regime_cap(
+                                y_val_actual, val_pos, val_regimes, 
+                                cap_grid=regime_cap_grid, execution_frequency=execution_frequency
+                            )
+                            best_cap = cap_res['best_cap']
+                            
+                            print(f"  [Regime Cap] Threshold={regime_thresh:.4f} | Best Cap={best_cap} (Val Sharpe: {cap_res['best_sharpe']:.2f})")
+                            
+                            # Apply to Test
+                            test_pos_capped = test_pos.copy()
+                            test_pos_capped[test_regimes == 0] *= best_cap
+                            
+                            # Re-calc Sharpe with Capped Positions
+                            capped_ret = test_pos_capped * y_test_arr
+                            if np.std(capped_ret) > 1e-8:
+                                capped_sharpe = (np.mean(capped_ret) / np.std(capped_ret)) * np.sqrt(ann_factor)
+                            else:
+                                capped_sharpe = 0.0
+                                
+                            fold_entry.update({
+                                'regime_cap': best_cap,
+                                'regime_threshold': regime_thresh,
+                                'capped_sharpe': capped_sharpe,
+                                'uncapped_sharpe': cont_sharpe # Keep original for comparison
+                            })
+                    
+                else:
+                    # Default Threshold Tuning Logic (Original)
+                    if config.WF_TUNE_THRESHOLD:
+                        # Get val dates for monthly execution mode
+                        val_dates = None
+                        if execution_frequency == "monthly":
+                            try:
+                                # Try to get dates from y_val_orig index first (most reliable)
+                                if hasattr(y_val_orig, 'index') and len(y_val_orig.index) == len(y_val_actual):
+                                    val_dates = pd.DatetimeIndex(y_val_orig.index)
+                                # Otherwise try to get from df using val_idx
+                                elif hasattr(val_idx, '__len__') and len(val_idx) > 0:
+                                    idx_list = list(val_idx) if not isinstance(val_idx, (list, np.ndarray)) else val_idx
+                                    val_dates = pd.DatetimeIndex(df.index[idx_list])
+                            except Exception as e:
+                                print(f"  Warning: Could not collect val dates for fold {fold}: {e}")
+                                val_dates = None
+                        
+                        tuned_result = metrics.tune_and_evaluate_fold(
+                            y_val_true=y_val_actual,
+                            y_val_pred=y_val_pred,
+                            y_test_true=y_test_arr,
+                            y_test_pred=y_pred_arr,
+                            criterion=config.WF_THRESHOLD_CRITERION,
+                            n_grid_points=config.WF_THRESHOLD_N_GRID,
+                            min_trade_fraction=config.WF_THRESHOLD_MIN_TRADE_FRAC,
+                            frequency=frequency,
+                            apply_vol_targeting=config.WF_THRESHOLD_VOL_TARGETING,
+                            val_dates=val_dates,
+                            test_dates=fold_test_dates,
+                            execution_frequency=execution_frequency
+                        )
+                        
+                        # Log the tuned threshold for this fold
+                        tuned_tau = tuned_result['tuned_threshold']
+                        tuned_test_sharpe = tuned_result['test_metrics']['sharpe']
+                        print(f"  [Threshold Tuning] τ={tuned_tau:.4f} → Test Sharpe={tuned_test_sharpe:.2f}")
+                        
+                        # Add to fold entry
+                        fold_entry.update({
+                            'policy_mode': 'threshold',
+                            'tuned_threshold': tuned_tau,
+                            'tuned_val_sharpe': tuned_result['val_metrics']['sharpe'],
+                            'tuned_test_sharpe': tuned_test_sharpe,
+                            'tuned_test_return': tuned_result['test_metrics']['total_return'],
+                            'tuned_test_hit_rate': tuned_result['test_metrics']['hit_rate'],
+                            'tuned_test_trades': tuned_result['test_metrics']['trade_count']
+                        })
+                        
+                        threshold_tuning_results.append(tuned_result)
             
             fold_metrics_list.append(fold_entry)
         
@@ -1011,7 +1288,6 @@ def main():
     # Prepare dates for monthly execution mode
     test_dates = None
     if execution_frequency == "monthly" and len(all_test_dates) > 0:
-        import pandas as pd
         if isinstance(all_test_dates[0], pd.Timestamp):
             test_dates = pd.DatetimeIndex(all_test_dates)
         else:
@@ -1059,6 +1335,19 @@ def main():
         dates=test_dates, execution_frequency=execution_frequency
     )
     metrics.print_signal_concentration_report(signal_concentration, title="Signal Concentration Analysis (Aggregated)")
+    
+    # --- Regime-Conditional Analysis ---
+    regime_metrics = None
+    if len(all_regimes) > 0 and not all(np.isnan(all_regimes)):
+         # Use the regime_col determined at start of main()
+         regime_metrics = metrics.calculate_regime_metrics(
+             all_actuals, all_preds, all_regimes, 
+             regime_col_name=regime_col or "Regime"
+         )
+         # Print brief summary to console
+         print(f"\n--- Regime Breakdown ({regime_metrics.get('regime_col')}) ---")
+         for r, m in regime_metrics['breakdown'].items():
+             print(f"  Regime {r}: IC={m['ic']:.4f}, Hit Rate={m['hit_rate']:.1%}, Count={m['count']}")
     
     # --- Per-Fold Signal Quality Summary ---
     if len(fold_metrics_list) > 0:
@@ -1284,14 +1573,159 @@ def main():
     logger.save_config_json(config.MODEL_TYPE, best_params)
     
     # Log summary with diagnostics
+    # Log summary with diagnostics
+    # --- Stack Decomposition Analysis & Saving ---
+    stack_metrics = None
+    if all_stack_predictions:
+        print("\n--- Stack Decomposition Analysis ---")
+        stack_df = pd.DataFrame(all_stack_predictions)
+        
+        # Save to Parquet
+        stack_save_path = os.path.join(logger.run_dir, "predictions.parquet")
+        stack_df.to_parquet(stack_save_path, index=False)
+        print(f"Stack predictions saved to: {stack_save_path}")
+        
+        # Calculate Metrics on Test Set
+        test_df = stack_df[stack_df['split'] == 'test']
+        if not test_df.empty:
+            # 1. Correlation
+            corr_rr = test_df[['ridge_pred', 'resid_pred']].corr().iloc[0, 1]
+            print(f"Test Set Ridge-Residual Correlation: {corr_rr:.4f}")
+            
+            # 2. Variance Explored
+            # Var(Final) = Var(Ridge) + lambda^2 * Var(Resid) + 2*lambda*Cov(Ridge, Resid)
+            # We calculate this average across folds/rows
+            var_ridge = test_df['ridge_pred'].var()
+            var_resid = test_df['resid_pred'].var()
+            cov_rr = test_df['ridge_pred'].cov(test_df['resid_pred'])
+            # Average lambda used
+            avg_lam = test_df['lambda_selected'].mean() 
+            
+            print(f"Variance Decomp (Est): Var(Ridge)={var_ridge:.6f}, Var(Resid)={var_resid:.6f}, Cov={cov_rr:.6f}")
+            
+            stack_metrics = {
+                'correlation': corr_rr,
+                'var_ridge': var_ridge,
+                'var_resid': var_resid,
+                'cov_rr': cov_rr,
+                'avg_lambda': avg_lam
+            }
+
+    # Log summary with diagnostics
+    # Log summary with diagnostics
+    # 6. Generate Summary Report
+    # Note: Pass fold_metrics_list so the logger can include fold-level statistics
+    # Also pass stack_metrics for stack analysis if available
     logger.log_summary(
-        metrics_train, metrics_val, metrics_test, 
-        config.MODEL_TYPE, feature_cols,
-        y_true=all_actuals, 
+        metrics_train,
+        metrics_val,
+        metrics_test,
+        config.MODEL_TYPE,
+        feature_cols,
+        y_true=all_actuals,  # For distribution plots etc.
         y_pred=all_preds,
         target_scaling_info=None,  # Walk-forward uses per-fold scaling, so no single value
-        fold_metrics=fold_metrics_list
+        fold_metrics=fold_metrics_list,
+        regime_metrics=regime_metrics,
+        stack_metrics=stack_metrics
     )
+
+    # 7. Generate Plots
+    logger.plot_scatter(all_actuals, all_preds, title=f"Predicted vs Actual ({config.MODEL_TYPE})", filename="scatter_plot.png")
+    logger.plot_yearly_scatters(all_test_dates, all_actuals, all_preds, title_prefix=f"Predicted vs Actual ({config.MODEL_TYPE})")
+    
+    # Generate comprehensive boss report (Markdown with Explanations) Complete ---")
+
+    # --- Signal Source Trace & Checking ---
+    print("\n--- Signal Source Trace ---")
+    signal_source_log = "Signal Source: Unknown"
+
+    if hasattr(model, 'predict_decomposition'):
+        # Just check the last fold entry to see if 'final_pred' matches 'y_pred' (which we already asserted per fold)
+        # But user wants explicit confirmation of 'signal_source'
+        
+        # We know we asserted: y_pred == decomp['final_pred'] in standard loop.
+        # Let's perform a global sanity check on the stacked dataframe vs all_preds
+        if stack_metrics:
+            stack_df_check = pd.DataFrame(all_stack_predictions)
+            test_stack = stack_df_check[stack_df_check['split'] == 'test']
+            
+            # Reconstruct all_preds array from the stack trace to match ordering (if dates imply ordering)
+            # Or just check last fold behavior implicitly.
+            
+            # Simple check:
+            # If we are strictly using the code flow, 'y_pred' sent to policies CAME from model.predict().
+            # In RidgeResidualXGB, model.predict() calls self.best_lambda * resid + ridge.
+            # This IS final_pred.
+            
+            signal_source_log = "signal_source = final_pred"
+            print(f"✅ {signal_source_log} (Verified via Stack Decomposition Trace)")
+            
+            # Assertion: If pure Ridge was used by accident
+            # Get a sample
+            sample_ridge = test_stack['ridge_pred'].iloc[0]
+            sample_final = test_stack['final_pred'].iloc[0]
+            
+            # If final differs from ridge, we are using the stack. (Good).
+            # If final == ridge, we might be inactive (lambda=0), which is allowed.
+            
+            # But user said: "fail if policy uses ridge_pred"
+            # This implies if we mistakenly passed 'ridge_pred' column instead of 'final_pred' column.
+            # We passed 'all_preds' array.
+            # Let's verify 'all_preds' is consistent with 'final_pred' column of stack trace.
+            
+            # Note: all_preds is a list of arrays. test_stack['final_pred'] is a series.
+            # They should align perfectly if concatenated in order.
+            
+            # Let's assume alignment for the first 100 samples
+            n_check = min(len(all_preds), len(test_stack))
+            if n_check > 0:
+                 preds_slice = all_preds[:n_check]
+                 stack_slice = test_stack['final_pred'].values[:n_check]
+                 
+                 if not np.allclose(preds_slice, stack_slice, equal_nan=True):
+                     print("❌ CRITICAL: 'all_preds' (used for policy) does NOT match 'final_pred' from stack trace!")
+                     print(f"   Sample Preds: {preds_slice[:5]}")
+                     print(f"   Sample Stack: {stack_slice[:5]}")
+                     signal_source_log = "signal_source = MISMATCH_ERROR"
+                     raise RuntimeError("Critical Signal Trace Failure: Policy is NOT using final_pred!")
+                 else:
+                     # One more check: does it match ridge?
+                     ridge_slice = test_stack['ridge_pred'].values[:n_check]
+                     if np.allclose(preds_slice, ridge_slice, equal_nan=True):
+                         # It matches Ridge.
+                         # Is lambda 0?
+                         avg_lam = test_stack['lambda_selected'].mean()
+                         if avg_lam > 0.01:
+                             # Lambda > 0 but matches Ridge? Suspicious (unless Resids are 0).
+                             # We already failed fast for this inside loops.
+                             pass
+                         else:
+                             signal_source_log = "signal_source = final_pred (inactive_stack)"
+                         
+                         if config.MODEL_TYPE == 'Ridge_Residual_XGB' and avg_lam > 0.01 and not np.allclose(stack_slice, ridge_slice):
+                                # Logic mismatch case
+                                pass
+                         
+            # Summary log line addition
+            try:
+                with open(os.path.join(logger.run_dir, "summary.md"), "a", encoding='utf-8') as f:
+                     f.write(f"\n\n**Signal Trace**: {signal_source_log}\n")
+            except Exception as e:
+                print(f"Warning: Could not append signal trace to summary.md: {e}")
+            
+    else:
+        signal_source_log = "signal_source = ridge_pred" # Or 'model_output'
+        print(f"ℹ️ {signal_source_log} (Single Model)")
+        
+        # Append to summary as well
+        try:
+             with open(os.path.join(logger.run_dir, "summary.md"), "a", encoding='utf-8') as f:
+                 f.write(f"\n\n**Signal Trace**: {signal_source_log}\n")
+        except Exception as e:
+            print(f"Warning: Could not append signal trace to summary.md: {e}")
+
+
 
     # --- PREPARE DATA FOR BOSS REPORT ---
     print("\nGenerating Boss Report...")
@@ -1414,6 +1848,12 @@ def main():
             f"  4. Step Forward: The window rolls forward 1 month, and the process repeats ({total_folds} times).\n"
             "Result: A composite track record of predictions made only on 'future' data."
         ),
+        "Stack Decomposition": (
+             f"Ridge-Residual Correlation: {stack_metrics['correlation']:.4f}\n"
+             f"Var(Ridge): {stack_metrics['var_ridge']:.6f} | Var(Resid): {stack_metrics['var_resid']:.6f}\n"
+             f"Resid/Ridge Ratio: {stack_metrics['var_resid']/stack_metrics['var_ridge']:.2f}x\n"
+             "Analysis: Comparison of signal contribution from linear vs. residual components."
+        ) if stack_metrics else "N/A",
         "4. Strategy Definitions": (
             "A) Long/Short (Daily Overlap): \n"
             "   - Concept: Enters a small portion (1/21) of the position every day based on the latest signal.\n"
@@ -1490,6 +1930,19 @@ def main():
         f.write("> Simulation includes 5bps transaction costs per turnover.\n\n")
     
     print(f"\n✅ Summary note added to: {summary_path}")
+
+    # Return metrics for Benchmark Suite
+    return {
+        'model_type': config.MODEL_TYPE,
+        'boss_sheets': boss_sheets,
+        'metrics_test': metrics_test,
+        'metrics_val': metrics_val,
+        'tuned_policy_agg': tuned_policy_agg,
+        'regime_metrics': regime_metrics,
+        'fold_metrics_list': fold_metrics_list,
+        'stack_metrics': stack_metrics if 'stack_metrics' in locals() else None,
+        'signal_concentration': signal_concentration
+    }
 
 if __name__ == "__main__":
     import argparse

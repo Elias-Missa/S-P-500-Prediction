@@ -174,7 +174,8 @@ class ExperimentLogger:
         }
         
     def log_summary(self, metrics_train, metrics_val, metrics_test, model_type, feature_cols,
-                    y_true=None, y_pred=None, target_scaling_info=None, fold_metrics=None):
+                    y_true=None, y_pred=None, target_scaling_info=None, fold_metrics=None,
+                    regime_metrics=None, stack_metrics=None):
         """
         Writes a markdown summary of the run with detailed explanations.
         
@@ -402,6 +403,22 @@ class ExperimentLogger:
                         if not np.isnan(ret):
                             f.write(f"| Q{i+1} | {ret:+.4f} |\n")
             
+            # Regime Breakdown Analysis
+            if regime_metrics is not None:
+                rm = regime_metrics
+                f.write(f"\n#### Regime Breakdown ({rm.get('regime_col', 'Regime')})\n")
+                f.write(f"> Performance split by market regime.\n\n")
+                
+                f.write(f"| Regime | Frequency | IC | Hit Rate | Decile Spread | Mean Return |\n")
+                f.write(f"|--------|-----------|----|----------|---------------|-------------|\n")
+                
+                # Sort regimes for display
+                sorted_regimes = sorted(rm['breakdown'].keys())
+                for r in sorted_regimes:
+                    m = rm['breakdown'][r]
+                    f.write(f"| **{r}** | {m['frequency']:.1%} ({m['count']}) | {m['ic']:.4f} | {m['hit_rate']:.1%} | {m['decile_spread']:.4f} | {m['mean_actual']:.4f} |\n")
+
+            
             # Threshold Tuning Results (Anti-Policy-Overfit)
             if 'threshold_tuning' in metrics_test:
                 tt = metrics_test['threshold_tuning']
@@ -423,6 +440,24 @@ class ExperimentLogger:
                     if 'thresholds_per_fold' in tt and tt['thresholds_per_fold']:
                         thresholds_str = ', '.join([f"{t:.4f}" for t in tt['thresholds_per_fold']])
                         f.write(f"- **Per-Fold τ**: [{thresholds_str}]\n")
+
+            # Stack Decomposition Reporting
+            if stack_metrics:
+                sm = stack_metrics
+                f.write(f"\n#### Stack Decomposition Analysis\n")
+                f.write("> Analysis of the Ridge + Residual Stacking components.\n\n")
+                
+                f.write(f"- **Ridge-Residual Correlation**: {sm['correlation']:.4f}\n")
+                f.write(f"> Low correlation implies the residual model is capturing unique signal.\n\n")
+                
+                f.write(f"**Variance Decomposition**\n")
+                f.write(f"- Var(Ridge): {sm['var_ridge']:.6f}\n")
+                f.write(f"- Var(Resid): {sm['var_resid']:.6f}\n")
+                f.write(f"- Covariance: {sm['cov_rr']:.6f}\n")
+                f.write(f"- Avg Lambda: {sm['avg_lambda']:.2f}\n")
+                if sm['var_ridge'] > 0:
+                    ratio = sm['var_resid'] / sm['var_ridge']
+                    f.write(f"- Resid/Ridge Var Ratio: {ratio:.2f}x\n")
             
             # Prediction Diagnostics section
             if y_true is not None and y_pred is not None:
@@ -539,6 +574,47 @@ class ExperimentLogger:
         plt.grid(True)
         
         self.save_plot(fig, filename)
+    
+    def plot_yearly_scatters(self, dates, y_true, y_pred, title_prefix="Predicted vs Actual"):
+        """
+        Generates a scatter plot for each unique year in the data.
+        """
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        # Ensure inputs are numpy arrays/series
+        dates = pd.to_datetime(dates)
+        y_true = np.array(y_true)
+        y_pred = np.array(y_pred)
+        
+        # Get unique years
+        unique_years = sorted(dates.year.unique())
+        
+        for year in unique_years:
+            mask = (dates.year == year)
+            if not any(mask):
+                continue
+                
+            y_true_yr = y_true[mask]
+            y_pred_yr = y_pred[mask]
+            
+            fig = plt.figure(figsize=(8, 8))
+            plt.scatter(y_true_yr, y_pred_yr, alpha=0.5)
+            
+            # Diagonal line
+            if len(y_true_yr) > 0:
+                 min_val = min(min(y_true_yr), min(y_pred_yr))
+                 max_val = max(max(y_true_yr), max(y_pred_yr))
+                 plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect Prediction')
+            
+            plt.xlabel("Actual Return")
+            plt.ylabel("Predicted Return")
+            plt.title(f"{title_prefix} - {year}")
+            plt.legend()
+            plt.grid(True)
+            
+            self.save_plot(fig, filename=f"scatter_plot_{year}.png")
     
     def save_config_json(self, model_type, best_params=None):
         """

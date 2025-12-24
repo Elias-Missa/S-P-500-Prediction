@@ -188,6 +188,14 @@ def calculate_ic(y_true, y_pred):
     """
     Calculates the Information Coefficient (Spearman Correlation).
     """
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    
+    # Filter NaNs
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true = y_true[mask]
+    y_pred = y_pred[mask]
+
     if len(y_true) < 2:
         return 0.0
     corr, _ = spearmanr(y_true, y_pred)
@@ -207,6 +215,11 @@ def calculate_hit_rate(y_true, y_pred):
     """
     y_true = np.array(y_true)
     y_pred = np.array(y_pred)
+    
+    # Filter NaNs
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true = y_true[mask]
+    y_pred = y_pred[mask]
     
     # Only count periods where actual != 0
     nonzero_mask = y_true != 0
@@ -231,26 +244,10 @@ def calculate_decile_spread(y_true, y_pred):
     Returns:
         Float: Mean return (top decile) - Mean return (bottom decile)
     """
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
-    
-    if len(y_pred) < 10:
-        return 0.0
-    
-    # Compute percentiles
-    top_threshold = np.percentile(y_pred, 90)
-    bottom_threshold = np.percentile(y_pred, 10)
-    
-    top_mask = y_pred >= top_threshold
-    bottom_mask = y_pred <= bottom_threshold
-    
-    if np.sum(top_mask) == 0 or np.sum(bottom_mask) == 0:
-        return 0.0
-    
-    mean_top = np.mean(y_true[top_mask])
-    mean_bottom = np.mean(y_true[bottom_mask])
-    
-    return mean_top - mean_bottom
+    # Use the robust analysis function to handle small sample sizes (fallback to quintiles)
+    # and ensure consistent logic.
+    result = calculate_decile_analysis(y_true, y_pred, n_quantiles=10)
+    return result['spread']
 
 
 def calculate_decile_analysis(y_true, y_pred, n_quantiles=10):
@@ -260,6 +257,8 @@ def calculate_decile_analysis(y_true, y_pred, n_quantiles=10):
     This is the key diagnostic for understanding where alpha is concentrated.
     If the model has predictive power, top deciles should have higher returns
     than bottom deciles.
+    
+    Automatic fallback to Quintiles (5) or Median Split (2) if sample size is too small.
     
     Args:
         y_true: Actual returns
@@ -282,17 +281,41 @@ def calculate_decile_analysis(y_true, y_pred, n_quantiles=10):
     y_true = np.array(y_true)
     y_pred = np.array(y_pred)
     
-    if len(y_pred) < n_quantiles * 2:
-        return {
-            'spread': 0.0, 'spread_tstat': 0.0, 'spread_pvalue': 1.0,
-            'top_mean': 0.0, 'bottom_mean': 0.0,
-            'top_count': 0, 'bottom_count': 0,
-            'monotonicity': 0.0, 'quantile_returns': []
-        }
+    # Filter NaNs
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true = y_true[mask]
+    y_pred = y_pred[mask]
     
+    N = len(y_pred)
+    
+    effective_quantiles = n_quantiles
+    
+    # --- Robust Usage Check & Fallback ---
+    # We ideally want at least 2 samples per bin to calculate a mean, and definitely to do a t-test.
+    # If N is small (e.g. < 20 for deciles), we fallback.
+    
+    if N < effective_quantiles * 2:
+        # Not enough samples for requested quantiles. Try fallbacks.
+        if N >= 10: # Enough for Quintiles (5 bins * 2 samples)
+            print(f"  [Metrics] Info: Sample size {N} too small for {n_quantiles} bins. Falling back to Quintiles (5).")
+            effective_quantiles = 5
+        elif N >= 4: # Enough for Median Split (2 bins * 2 samples)
+            print(f"  [Metrics] Info: Sample size {N} too small for {n_quantiles} bins. Falling back to Median Split (2).")
+            effective_quantiles = 2
+        else:
+            # Too few samples to calculate spread meaningfuly
+            return {
+                'spread': 0.0, 'spread_tstat': 0.0, 'spread_pvalue': 1.0,
+                'top_mean': 0.0, 'bottom_mean': 0.0,
+                'top_count': 0, 'bottom_count': 0,
+                'monotonicity': 0.0, 'quantile_returns': []
+            }
+            
     # Assign quantile labels based on predictions
     try:
-        quantile_labels = pd.qcut(y_pred, n_quantiles, labels=False, duplicates='drop')
+        # Method='first' ensures we force bins even if values are identical (handled by rank usually, but qcut handles it)
+        # duplicates='drop' merges bins if edges are unique. We want to avoid crashing.
+        quantile_labels = pd.qcut(y_pred, effective_quantiles, labels=False, duplicates='drop')
     except ValueError:
         # Not enough unique values for quantiles
         return {
@@ -311,9 +334,11 @@ def calculate_decile_analysis(y_true, y_pred, n_quantiles=10):
         if np.sum(mask) > 0:
             quantile_returns.append(np.mean(y_true[mask]))
         else:
-            quantile_returns.append(np.nan)
+            quantile_returns.append(0.0) # Handle empty bin gracefully
     
-    # Top and bottom decile
+    # Top and bottom buckets
+    # Note: If duplicates dropped bins, n_actual might be < effective. 
+    # The highest label is n_actual_quantiles - 1.
     top_mask = quantile_labels == (n_actual_quantiles - 1)
     bottom_mask = quantile_labels == 0
     
@@ -325,8 +350,13 @@ def calculate_decile_analysis(y_true, y_pred, n_quantiles=10):
     spread = top_mean - bottom_mean
     
     # T-test for spread significance
+    # We need sufficient samples in top/bottom buckets
     if len(top_returns) > 1 and len(bottom_returns) > 1:
-        tstat, pvalue = ttest_ind(top_returns, bottom_returns)
+        # For small N with unequal variances, Welch's t-test (equal_var=False) is safer, 
+        # but standard t-test is acceptable here.
+        with np.errstate(all='ignore'): # Suppress divide by zero warnings in ttest
+             tstat, pvalue = ttest_ind(top_returns, bottom_returns)
+             if np.isnan(tstat): tstat, pvalue = 0.0, 1.0
     else:
         tstat, pvalue = 0.0, 1.0
     
@@ -336,6 +366,9 @@ def calculate_decile_analysis(y_true, y_pred, n_quantiles=10):
     if len(valid_returns) >= 3:
         mono_corr, _ = spearmanr(range(len(valid_returns)), valid_returns)
         monotonicity = mono_corr if not np.isnan(mono_corr) else 0.0
+    elif len(valid_returns) == 2:
+        # For 2 bins, monotonicity is simply sign of spread (1.0 or -1.0)
+        monotonicity = 1.0 if valid_returns[1] > valid_returns[0] else -1.0
     else:
         monotonicity = 0.0
     
@@ -498,6 +531,84 @@ def calculate_signal_concentration(y_true, y_pred, frequency=None, dates=None, e
         'coverage_sharpe_corr': coverage['coverage_performance_corr'],
         'coverage_analysis': coverage['threshold_analysis']
     }
+
+
+def calculate_regime_metrics(y_true, y_pred, regimes, regime_col_name="Regime"):
+    """
+    Calculate performance metrics conditional on regime.
+
+    Args:
+        y_true: Actual returns
+        y_pred: Predicted returns
+        regimes: Array of regime labels (e.g., 0 and 1)
+        regime_col_name: Name of the regime column for display
+
+    Returns:
+        Dictionary with metrics for each regime.
+    """
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    regimes = np.array(regimes)
+    
+    # Filter NaNs from basic inputs (regimes handled separately)
+    # We only care about rows where we have both y_true and y_pred
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    
+    # Also require valid regime if it's not nan (but allow nan to be skipped effectively by unique check)
+    # Actually, let's filter everything to keep lengths consistent
+    # If regime is NaN, we can't categorize it, so likely skip
+    if len(regimes) == len(mask):
+        mask = mask & np.isfinite(regimes)
+        
+    y_true = y_true[mask]
+    y_pred = y_pred[mask]
+    regimes = regimes[mask]
+    
+    # Identify unique regimes (ignoring NaNs)
+    unique_regimes = np.unique(regimes[~np.isnan(regimes)])
+    unique_regimes = sorted(unique_regimes)
+    
+    results = {
+        'regime_col': regime_col_name,
+        'breakdown': {}
+    }
+    
+    total_samples = len(y_true)
+    
+    for r in unique_regimes:
+        mask = regimes == r
+        n_samples = np.sum(mask)
+        
+        if n_samples < 5:
+            continue
+            
+        r_str = str(int(r)) if float(r).is_integer() else str(r)
+        
+        # Slice data
+        y_true_r = y_true[mask]
+        y_pred_r = y_pred[mask]
+        
+        # Compute metrics
+        ic = calculate_ic(y_true_r, y_pred_r)
+        decile_spread = calculate_decile_spread(y_true_r, y_pred_r)
+        hit_rate = calculate_hit_rate(y_true_r, y_pred_r)
+        
+        # Coverage/Sharpe analysis (simplified)
+        # We can reuse evaluate_policy for a quick Sharpe check at 0 threshold (always in)
+        # or just compute basic signal quality
+        
+        results['breakdown'][r_str] = {
+            'count': int(n_samples),
+            'frequency': n_samples / total_samples,
+            'ic': ic,
+            'decile_spread': decile_spread,
+            'hit_rate': hit_rate,
+            'mean_actual': np.mean(y_true_r),
+            'mean_pred': np.mean(y_pred_r),
+            'std_actual': np.std(y_true_r)
+        }
+        
+    return results
 
 
 def print_signal_concentration_report(results, title="Signal Concentration Analysis"):
@@ -731,6 +842,123 @@ def compute_monthly_returns_from_forward_returns(forward_returns, dates, monthly
     return np.array(monthly_returns)
 
 
+def optimize_continuous_k(y_true, y_pred_z, k_grid=None, execution_frequency='monthly'):
+    """
+    Tune the multiplier k for the continuous sizing policy:
+        position = clip(k * zscore(pred), -1, 1)
+
+    Args:
+        y_true: Actual returns
+        y_pred_z: Z-scored predictions (pred - mu) / sigma
+        k_grid: List of k values to try (default [0.5, 1.0, 1.5])
+        execution_frequency: 'daily' or 'monthly' for Sharpe calculation
+
+    Returns:
+        Dictionary with 'best_k', 'best_sharpe', and 'results'
+    """
+    if k_grid is None:
+        k_grid = [0.5, 1.0, 1.5]
+
+    best_k = 1.0
+    best_sharpe = -float('inf')
+    results = []
+
+    y_true_arr = np.array(y_true)
+    y_pred_z_arr = np.array(y_pred_z)
+
+    # Calculate annualization factor
+    ann_factor = get_annualization_factor(execution_frequency)
+
+    for k in k_grid:
+        # Calculate position
+        pos = np.clip(k * y_pred_z_arr, -1.0, 1.0)
+        
+        # Calculate strategy returns
+        # Note: This ignores transaction costs for tuning simplicity, but consistent with other areas
+        strat_ret = pos * y_true_arr
+        
+        # Calculate Sharpe
+        mean_ret = np.mean(strat_ret)
+        std_ret = np.std(strat_ret)
+        
+        if std_ret > 1e-8:
+            sharpe = (mean_ret / std_ret) * np.sqrt(ann_factor)
+        else:
+            sharpe = 0.0
+
+        results.append({'k': k, 'sharpe': sharpe})
+
+        if sharpe > best_sharpe:
+            best_sharpe = sharpe
+            best_k = k
+
+    return {
+        'best_k': best_k,
+        'best_sharpe': best_sharpe,
+        'results': results
+    }
+
+
+def optimize_regime_cap(y_true, y_pred, regimes, cap_grid=None, execution_frequency='monthly'):
+    """
+    Tune the position cap for Regime 0:
+        position[regime == 0] *= cap
+
+    Args:
+        y_true: Actual returns
+        y_pred: Base positions (e.g. from continuous policy or sign)
+        regimes: Binary array (0=Low Vol/Target Regime, 1=Other)
+        cap_grid: List of multipliers to try (default [0.0, 0.5, 1.0])
+        execution_frequency: 'daily' or 'monthly' for Sharpe calculation
+
+    Returns:
+        Dictionary with 'best_cap', 'best_sharpe', and 'results'
+    """
+    if cap_grid is None:
+        cap_grid = [0.0, 0.5, 1.0]
+        
+    best_cap = 1.0
+    best_sharpe = -float('inf')
+    results = []
+    
+    y_true_arr = np.array(y_true)
+    y_pred_arr = np.array(y_pred)
+    regimes_arr = np.array(regimes)
+    
+    ann_factor = get_annualization_factor(execution_frequency)
+    
+    for cap in cap_grid:
+        # Apply cap to Regime 0
+        pos_capped = y_pred_arr.copy()
+        # Ensure mask aligns
+        mask = (regimes_arr == 0)
+        pos_capped[mask] *= cap
+        
+        # Calculate strategy returns
+        strat_ret = pos_capped * y_true_arr
+        
+        # Calculate Sharpe
+        mean_ret = np.mean(strat_ret)
+        std_ret = np.std(strat_ret)
+        
+        if std_ret > 1e-8:
+            sharpe = (mean_ret / std_ret) * np.sqrt(ann_factor)
+        else:
+            sharpe = 0.0
+            
+        results.append({'cap': cap, 'sharpe': sharpe})
+        
+        if sharpe > best_sharpe:
+            best_sharpe = sharpe
+            best_cap = cap
+            
+    return {
+        'best_cap': best_cap,
+        'best_sharpe': best_sharpe,
+        'results': results
+    }
+
+
 def evaluate_policy(y_true, y_pred, policy='long_short', threshold=0.03,
                     returns_for_vol=None, apply_vol_targeting=False,
                     target_vol=DEFAULT_TARGET_VOL, vol_lookback=DEFAULT_VOL_LOOKBACK,
@@ -869,31 +1097,78 @@ def evaluate_policy(y_true, y_pred, policy='long_short', threshold=0.03,
     # Max drawdown
     max_dd = compute_max_drawdown(equity_curve)
     
-    # Hit rate (directional accuracy) - use evaluation data
-    hit_rate = calculate_hit_rate(y_true_eval, y_pred_eval)
-    
-    # Information coefficient - use evaluation data
-    ic = calculate_ic(y_true_eval, y_pred_eval)
-    
-    # Decile spread - use evaluation data
-    decile_spread = calculate_decile_spread(y_true_eval, y_pred_eval)
-    
     # Trade statistics
     active_mask = positions != 0
     trade_count = np.sum(active_mask)
     holding_frequency = trade_count / n_periods if n_periods > 0 else 0.0
     
-    # Average return per trade (when position != 0)
-    if trade_count > 0:
-        avg_return_per_trade = np.mean(strategy_returns[active_mask])
-    else:
-        avg_return_per_trade = 0.0
+    # --- AUDIT UPDATE ---
+    # Metrics computed on Active Periods Only (where positions != 0)
+    # This prevents dilution by cash periods (zeros) and focuses on trade quality.
     
-    # Win rate (fraction of positive returns when trading)
     if trade_count > 0:
-        win_rate = np.mean(strategy_returns[active_mask] > 0)
+        # subset for active periods
+        y_true_active = y_true_eval[active_mask]
+        y_pred_active = y_pred_eval[active_mask]
+        strategy_rets_active = strategy_returns[active_mask]
+        
+        # Hit rate (active only) - Manual calc to ensure same mask
+        # We define Hit (Directional Accuracy) as sign(pred) == sign(true)
+        # But for strategy, Win Rate (profit > 0) is often what's meant.
+        # Let's keep strict Directional Accuracy but on the Active Set.
+        # We do NOT drop zeros here to enforce "Same Trade Mask"
+        
+        # Determine direction matches
+        # For Long (1): Hit if y_true > 0
+        # For Short (-1): Hit if y_true < 0
+        # For Flat (0): masked out
+        
+        # Recalculate positions active to be safe (though active_mask does this)
+        pos_active = positions[active_mask]
+        
+        # Hit: Position * Return > 0 (Profit) or == 0? 
+        # Usually Hit Rate in ML = Direction Match.
+        # If I am Long and Return is 0, Sign(1) != Sign(0). Miss.
+        hits = np.sign(pos_active) == np.sign(y_true_active)
+        hit_rate = np.mean(hits)
+        
+        # Overwrite the generic calculate_hit_rate call which might drop zeros
+        # hit_rate = calculate_hit_rate(y_true_active, y_pred_active)
+        
+        # IC (active only)
+        ic = calculate_ic(y_true_active, y_pred_active)
+        
+        # Decile spread (active only - likely noisy if count small, but consistent)
+        decile_spread = calculate_decile_spread(y_true_active, y_pred_active)
+        
+        # Win rate (active only)
+        win_rate = np.mean(strategy_rets_active > 0)
+        
+        # Average return per trade
+        avg_return_per_trade = np.mean(strategy_rets_active)
+        
+        # Active Sharpe (Quality of Trades)
+        # Note: We use daily returns for Sharpe, not per-trade, so we use strategy_rets_active
+        mean_active = np.mean(strategy_rets_active)
+        std_active = np.std(strategy_rets_active)
+        
+        if std_active == 0:
+            sharpe = 0.0
+        else:
+            sharpe = (mean_active / std_active) * np.sqrt(ann_factor)
+            
     else:
-        win_rate = 0.0
+        # No trades -> Metrics are Undefined (NaN), not Zero
+        hit_rate = np.nan
+        ic = np.nan
+        decile_spread = np.nan
+        win_rate = np.nan
+        avg_return_per_trade = np.nan
+        sharpe = np.nan
+        
+    # Total metrics (Portfolio Level)
+    # Total return and MaxDD still use the full equity curve (including cash/zeros)
+    # as these are portfolio constraints.
     
     return {
         'policy': policy,
@@ -1217,6 +1492,32 @@ def tune_and_evaluate_fold(y_val_true, y_val_pred, y_test_true, y_test_pred,
         execution_frequency=execution_frequency
     )
     
+
+    
+    # Debug Logging for Audit (Enhanced)
+    print(f"  [Fold Audit] Tuned Threshold: {best_tau:.4f} (Score: {tuning_result['best_score']:.4f})")
+    
+    val_trades = val_metrics['trade_count']
+    val_cov = val_metrics['holding_frequency']
+    val_nans = np.isnan(y_val_true).sum()
+    print(f"  [Fold Audit] Val: {len(y_val_true)} rows (NaNs: {val_nans}), {val_trades} trades ({val_cov:.1%}) -> Sharpe: {val_metrics['sharpe']:.2f}")
+    
+    test_trades = test_metrics['trade_count']
+    test_cov = test_metrics['holding_frequency']
+    test_nans = np.isnan(y_test_true).sum()
+    
+    if np.isnan(test_metrics['sharpe']):
+        sharpe_str = "NaN (No Trades)"
+    else:
+        sharpe_str = f"{test_metrics['sharpe']:.2f}"
+        
+    print(f"  [Fold Audit] Test: {len(y_test_true)} rows (NaNs: {test_nans}), {test_trades} trades ({test_cov:.1%}) -> Sharpe: {sharpe_str}")
+    
+    if test_metrics['trade_count'] == 0:
+        print(f"  [Fold Audit] NOTE: No trades in test set at threshold {best_tau:.4f}")
+    elif test_metrics['trade_count'] < 5:
+        print(f"  [Fold Audit] WARNING: Very low trade count in test ({test_trades}). Metrics might be noisy.")
+
     return {
         'tuned_threshold': best_tau,
         'tuning_score': tuning_result['best_score'],
@@ -1262,16 +1563,16 @@ def aggregate_tuned_policy_results(fold_results, include_baseline=True):
         'val_sharpe_mean': np.mean(val_sharpes),
         'val_sharpe_std': np.std(val_sharpes),
         
-        'test_sharpe_mean': np.mean(test_sharpes),
-        'test_sharpe_std': np.std(test_sharpes),
-        'test_sharpe_median': np.median(test_sharpes),
+        'test_sharpe_mean': np.nanmean(test_sharpes),
+        'test_sharpe_std': np.nanstd(test_sharpes),
+        'test_sharpe_median': np.nanmedian(test_sharpes),
         
-        'test_return_mean': np.mean(test_returns),
-        'test_return_sum': np.sum(test_returns),  # Approx total return
+        'test_return_mean': np.nanmean(test_returns),
+        'test_return_sum': np.nansum(test_returns),  # Approx total return
         
-        'test_hit_rate_mean': np.mean(test_hit_rates),
+        'test_hit_rate_mean': np.nanmean(test_hit_rates),
         'test_trade_count_total': np.sum(test_trade_counts),
-        'test_ic_mean': np.mean(test_ics),
+        'test_ic_mean': np.nanmean(test_ics),
         
         # Detailed per-fold results for logging
         'fold_details': fold_results

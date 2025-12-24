@@ -19,6 +19,9 @@ FEAT_BREADTH_THRUST_WINDOW = 5  # 1 week for breadth momentum
 # Regime Settings
 REGIME_BREADTH_THRESHOLD = 0.5 # 50% stocks above 50MA = Bull
 
+# Data Quality Configuration
+INCLUDE_QC_FEATURES = False # If True, allows features starting with 'QC_' to be included
+
 # Data Rehab (Feature Transformation) Flag
 APPLY_DATA_REHAB = True  # If True, applies feature_rehab pipeline (diffs, Z-scores, drops) in dataset_builder
 
@@ -65,7 +68,7 @@ BIG_MOVE_ALPHA = 0.0       # extra weight factor in tail-weighted loss (0.0 = di
 
 # Splitting Parameters
 TEST_START_DATE = '2023-01-01'
-TRAIN_START_DATE = '2010-01-01' # If set, overrides TRAIN_WINDOW_YEARS for an Expanding Window
+TRAIN_START_DATE = None # If set, overrides TRAIN_WINDOW_YEARS for an Expanding Window
 TRAIN_WINDOW_YEARS = 10 # Default rolling window if TRAIN_START_DATE is None
 VAL_WINDOW_MONTHS = 6
 
@@ -81,15 +84,14 @@ EMBARGO_ROWS = EMBARGO_ROWS_DAILY if DATA_FREQUENCY == "daily" else EMBARGO_ROWS
 
 # Model Parameters
 # Options: 'LinearRegression', 'RandomForest', 'XGBoost', 'MLP', 'LSTM', 'CNN', 'Transformer', 'Ridge'
-MODEL_TYPE = 'RegimeGatedHybrid'
+MODEL_TYPE = 'Ridge'
 REGIME_COL = 'Breadth_Regime'
-REGIME_LOW_MODEL = 'Ridge'
-REGIME_HIGH_MODEL = 'RandomForest'
 BASIC_MODEL_SUITE = ['LinearRegression', 'RandomForest', 'XGBoost', 'MLP']
 
 # Ridge Regression
 # Alpha grid for walk-forward CV hyperparameter selection using val Spearman IC
-RIDGE_ALPHA_GRID = [1, 10, 50, 100, 300, 1000]
+# Alpha grid for walk-forward CV hyperparameter selection using val Spearman IC
+RIDGE_ALPHA_GRID = [0.1, 1, 10, 50, 100, 300, 500, 1000]
 
 # Feature Scaling
 # Enable per-fold feature standardization using training-set statistics only
@@ -124,6 +126,18 @@ XGB_GAMMA = 0                  # Minimum loss reduction required to make a furth
 XGB_REG_ALPHA = 0              # L1 regularization term on weights
 XGB_REG_LAMBDA = 1             # L2 regularization term on weights
 XGB_MAX_DELTA_STEP = 0        # Maximum delta step for tree constraints (0 = no constraint)
+
+# --- Stack Lambda Selection ---
+STACK_LAMBDA_GRID = [0.0, 0.25, 0.5, 0.75, 1.0] # Candidates for mixing
+STACK_LAMBDA_CRITERION = 'monthly_sharpe' # Metric to optimize: 'rmse', 'ic', 'decile_spread', 'monthly_sharpe'
+
+# --- Policy Configuration ---
+POLICY_MODE = 'monthly_continuous' # 'threshold' (default) or 'monthly_continuous'
+POLICY_K_GRID = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0] # Grid for k-factor tuning in continuous mode
+
+# --- Regime Risk Cap ---
+REGIME_RISK_CAP_GRID = [0.0, 0.25, 0.5, 0.75, 1.0] # Candidates for capping Regime 0 positions
+REGIME_ORACLE_COL = 'RV_Ratio' # Column to define regime (Low=0, High=1)"
 
 # MLP Params
 MLP_HIDDEN_LAYERS = (64, 32)
@@ -180,7 +194,7 @@ TFT_DROPOUT = 0.1
 
 # -----------------------------------------------------------------------------
 # Tuning Configuration (Optuna)
-USE_OPTUNA = False
+USE_OPTUNA = True
 OPTUNA_TRIALS = 20
 
 # Hyperparameter tuning (walk-forward CV) configuration
@@ -264,5 +278,5 @@ MACRO_FFILL_COLS = [
 # ===============================
 # Hyperparameter Tuning
 # ===============================
-USE_OPTUNA = False
+USE_OPTUNA = True
 OPTUNA_TRIALS = 20

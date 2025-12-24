@@ -1,0 +1,67 @@
+{
+  "run_info": {
+    "model_name": "Ridge",
+    "process_tag": "WalkForward",
+    "loss_tag": "HUBER",
+    "run_dir": "C:\\Users\\eomis\\SP500 Project\\S-P-500-Prediction\\ML_Output\\ridge\\Ridge_65th_WalkForward_HUBER_12-24-2025_17-24",
+    "timestamp": "2025-12-24T17:24:35.991232"
+  },
+  "data_config": {
+    "data_frequency": "daily",
+    "target_mode": "forward_21d",
+    "target_horizon_days": 21,
+    "embargo_rows_daily": 21,
+    "embargo_rows_monthly": 1,
+    "test_start_date": "2023-01-01",
+    "train_start_date": null,
+    "train_window_years": 10,
+    "val_window_months": 6
+  },
+  "model_config": {
+    "model_type": "Ridge",
+    "target_scaling_mode": "standardize"
+  },
+  "training_config": {
+    "loss_mode": "huber",
+    "huber_delta": 1.0,
+    "tail_alpha": 0.0,
+    "tail_threshold": 0.03,
+    "pred_clip": null
+  },
+  "execution_config": {
+    "execution_frequency": "monthly"
+  },
+  "regime_config": {
+    "regime_col": "Breadth_Regime",
+    "regime_low_model": null,
+    "regime_high_model": null
+  },
+  "hyperparameters": {
+    "alpha_grid": [
+      0.1,
+      1,
+      10,
+      50,
+      100,
+      300,
+      500,
+      1000
+    ],
+    "feature_standardize_per_fold": true,
+    "tuned_params": {
+      "alpha": 0.10261688205042939
+    }
+  },
+  "walkforward_config": {
+    "val_months": 6,
+    "train_on_train_plus_val": false,
+    "use_tuned_params": false,
+    "early_stopping": true,
+    "patience": 10,
+    "grad_clip_norm": 1.0,
+    "tune_threshold": true,
+    "threshold_criterion": "sharpe",
+    "threshold_n_grid": 10,
+    "threshold_min_trade_frac": 0.1
+  }
+}

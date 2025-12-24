@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
-from ML import config, data_prep, models, utils, metrics, lstm_dataset, tuning
+from ML import config, data_prep, models, utils, metrics, lstm_dataset, tuning, feature_selection
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
@@ -188,10 +188,9 @@ def main():
     
     train_idx, val_idx, test_idx = splitter.get_split(df)
     
-    # Features and Target (exclude BigMove labels to prevent target leakage)
+    # Features and Target (centralized selection)
     target_col = config.TARGET_COL
-    exclude_cols = [target_col, 'BigMove', 'BigMoveUp', 'BigMoveDown']
-    feature_cols = [c for c in df.columns if c not in exclude_cols]
+    feature_cols = feature_selection.select_feature_columns(df)
     
     X_train, y_train = df.loc[train_idx, feature_cols], df.loc[train_idx, target_col]
     X_val, y_val = df.loc[val_idx, feature_cols], df.loc[val_idx, target_col]
