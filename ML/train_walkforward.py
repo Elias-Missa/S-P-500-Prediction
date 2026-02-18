@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
-from ML import config, data_prep, models, utils, metrics, lstm_dataset, tuning, lstm_configs, feature_selection
+from ML import config, data_prep, models, utils, metrics, lstm_dataset, tuning
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
@@ -17,10 +17,6 @@ def main():
     logger = utils.ExperimentLogger(model_name=config.MODEL_TYPE, process_tag="WalkForward", loss_tag=loss_tag)
     
     print("--- Walk-Forward Validation ---")
-
-    # Detect Device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using Device: {device}")
     
     # 1. Load Data using dataset_builder for proper frequency handling
     df, metadata = data_prep.load_dataset(use_builder=True)
@@ -105,47 +101,15 @@ def main():
     
     # Exclude BigMove labels to prevent target leakage
     target_col = config.TARGET_COL
-    # Centralized feature selection
-    feature_cols = feature_selection.select_feature_columns(df)
-    print(f"Features Selected: {len(feature_cols)}")
+    exclude_cols = [target_col, 'BigMove', 'BigMoveUp', 'BigMoveDown']
+    feature_cols = [c for c in df.columns if c not in exclude_cols]
     
     all_preds = []
-    all_feature_importances = []  # Store importances per fold
     all_actuals = []
-    all_regimes = [] # Store regime labels for analysis
     fold_metrics_list = []  # Store per-fold metrics
     threshold_tuning_results = []  # Store per-fold threshold tuning results
     
-    # Store stack decomposition data
-    all_stack_predictions = [] 
-    
-    # Determine Regime Column (default to 'Breadth_Regime' or 'RV_Ratio' if available)
-    regime_col = getattr(config, 'REGIME_COL', None)
-    if regime_col is None:
-        if 'Breadth_Regime' in df.columns:
-            regime_col = 'Breadth_Regime'
-        elif 'RV_Ratio' in df.columns:
-            regime_col = 'RV_Ratio'
-            
     print(f"Model: {config.MODEL_TYPE}")
-    if regime_col:
-        print(f"Tracking Performance by Regime: {regime_col}")
-    
-    # Check for Regime-Gated Configuration
-    if config.MODEL_TYPE.startswith("RegimeGated"):
-        regime_col = getattr(config, 'REGIME_COL', 'RV_Ratio')
-        print(f"Regime Column: {regime_col}")
-        
-        # Verify regime column exists
-        if regime_col not in df.columns:
-            raise ValueError(f"CRITICAL ERROR: Regime column '{regime_col}' not found in dataset. Available columns: {df.columns.tolist()}")
-            
-        if config.MODEL_TYPE == 'RegimeGatedHybrid':
-            low_model = getattr(config, 'REGIME_LOW_MODEL', 'Ridge')
-            high_model = getattr(config, 'REGIME_HIGH_MODEL', 'RandomForest')
-            print(f"Regime Low Vol Model: {low_model}")
-            print(f"Regime High Vol Model: {high_model}")
-            
     if config.WF_TUNE_THRESHOLD:
         print(f"Threshold Tuning: ENABLED (criterion={config.WF_THRESHOLD_CRITERION}, grid_points={config.WF_THRESHOLD_N_GRID})")
     print(f"Rolling Train Window: {config.TRAIN_WINDOW_YEARS} years")
@@ -155,11 +119,7 @@ def main():
     if config.WF_USE_TUNED_PARAMS and config.WF_BEST_PARAMS_PATH and os.path.exists(config.WF_BEST_PARAMS_PATH):
         # Load pre-tuned params from file
         with open(config.WF_BEST_PARAMS_PATH, 'r') as f:
-            tuned = json.load(f)
-        
-        # EXPOSE TUNED PARAMS FOR REPORTING (Crucial Change)
-        best_params = tuned
-        
+            best_params = json.load(f)
         print(f"Using pre-tuned parameters from {config.WF_BEST_PARAMS_PATH}")
         logger.set_tuning_info(
             method=f"Pre-tuned parameters loaded from file",
@@ -168,56 +128,6 @@ def main():
             tune_end_date=None,
             n_trials=None,
         )
-        
-        # Backward compatibility for Transformer config overrides
-        if config.MODEL_TYPE == 'Transformer':
-             # Override Transformer params - support Optuna keys with backward compatibility
-            # Prefer Optuna keys (num_heads, num_layers, dim_feedforward) over old keys (heads, layers, ff_dim)
-            if 'model_dim' in tuned:
-                config.TRANSFORMER_MODEL_DIM = tuned['model_dim']
-            
-            # num_heads (Optuna) or heads (backward compat)
-            if 'num_heads' in tuned:
-                config.TRANSFORMER_HEADS = tuned['num_heads']
-            elif 'heads' in tuned:
-                config.TRANSFORMER_HEADS = tuned['heads']
-            
-            # num_layers (Optuna) or layers (backward compat)
-            if 'num_layers' in tuned:
-                config.TRANSFORMER_LAYERS = tuned['num_layers']
-            elif 'layers' in tuned:
-                config.TRANSFORMER_LAYERS = tuned['layers']
-            
-            # dim_feedforward (Optuna) or ff_dim (backward compat)
-            if 'dim_feedforward' in tuned:
-                config.TRANSFORMER_FEEDFORWARD_DIM = tuned['dim_feedforward']
-            elif 'ff_dim' in tuned:
-                config.TRANSFORMER_FEEDFORWARD_DIM = tuned['ff_dim']
-            
-            if 'dropout' in tuned:
-                config.TRANSFORMER_DROPOUT = tuned['dropout']
-            if 'lr' in tuned:
-                config.TRANSFORMER_LR = tuned['lr']
-            if 'weight_decay' in tuned:
-                config.TRANSFORMER_WEIGHT_DECAY = tuned['weight_decay']
-            if 'batch_size' in tuned:
-                config.TRANSFORMER_BATCH_SIZE = tuned['batch_size']
-            if 'time_steps' in tuned:
-                config.TRANSFORMER_TIME_STEPS = tuned['time_steps']
-            
-            # Print final overrides in a clean format
-            print("\n--- Final Transformer Overrides ---")
-            print(f"  model_dim:        {config.TRANSFORMER_MODEL_DIM}")
-            print(f"  num_heads:        {config.TRANSFORMER_HEADS}")
-            print(f"  num_layers:       {config.TRANSFORMER_LAYERS}")
-            print(f"  dim_feedforward:  {config.TRANSFORMER_FEEDFORWARD_DIM}")
-            print(f"  dropout:          {config.TRANSFORMER_DROPOUT}")
-            print(f"  lr:               {config.TRANSFORMER_LR}")
-            print(f"  weight_decay:    {config.TRANSFORMER_WEIGHT_DECAY}")
-            print(f"  batch_size:       {config.TRANSFORMER_BATCH_SIZE}")
-            print(f"  time_steps:       {config.TRANSFORMER_TIME_STEPS}")
-            print("---\n")
-
     elif config.USE_OPTUNA:
         print("\n=== Starting Optuna Hyperparameter Tuning ===")
         # Use the first fold's data for tuning, or use tuning window if available
@@ -330,36 +240,16 @@ def main():
         y_train_actual = None
         
         # Train
-        if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer', 'TFT']:
+        if config.MODEL_TYPE in ['LSTM', 'CNN', 'Transformer']:
             # --- Deep Learning Training Logic ---
             # Determine time_steps for deep models (use tuned params if available)
             time_steps = None
-            lstm_config_overrides = {}
-            
             if config.MODEL_TYPE == 'LSTM':
-                # Load selected LSTM config preset if available
-                config_name = getattr(config, 'LSTM_CONFIG_NAME', 'default')
-                preset_config = lstm_configs.LSTM_CONFIGS.get(config_name, lstm_configs.LSTM_CONFIGS['default'])
-                print(f"Using LSTM Config: {config_name}")
-                
-                # Apply preset config values as base overrides
-                lstm_config_overrides['hidden_dim'] = preset_config.get('hidden_dim', config.LSTM_HIDDEN_DIM)
-                lstm_config_overrides['num_layers'] = preset_config.get('num_layers', config.LSTM_LAYERS)
-                lstm_config_overrides['dropout'] = preset_config.get('dropout', 0.2)
-                lstm_config_overrides['lr'] = preset_config.get('learning_rate', config.LSTM_LEARNING_RATE)
-                lstm_config_overrides['batch_size'] = preset_config.get('batch_size', config.LSTM_BATCH_SIZE)
-                lstm_config_overrides['epochs'] = preset_config.get('epochs', config.LSTM_EPOCHS)
-                
-                time_steps = best_params.get('time_steps', preset_config.get('time_steps', config.LSTM_TIME_STEPS))
-            elif config.MODEL_TYPE == 'LSTM':
                 time_steps = best_params.get('time_steps', getattr(config, 'LSTM_TIME_STEPS', 10))
             elif config.MODEL_TYPE == 'CNN':
                 time_steps = best_params.get('time_steps', getattr(config, 'CNN_TIME_STEPS', 10))
             elif config.MODEL_TYPE == 'Transformer':
-                time_steps = best_params.get('time_steps', config.TRANSFORMER_TIME_STEPS)
-            elif config.MODEL_TYPE == 'TFT':
-                # TFT needs lookback. Default to Transformer's setting or Hardcode 63 (3 months)
-                time_steps = 63 
+                time_steps = best_params.get('time_steps', getattr(config, 'TRANSFORMER_TIME_STEPS', 20))
             
             if time_steps is not None and fold == 0:
                 print(f"Using time_steps={time_steps} for sequence creation")
@@ -373,96 +263,37 @@ def main():
             if scaling_mode == "vol_scale":
                 # Vol-scale: divide by std only (keeps 0 at 0)
                 y_mean = 0.0
-            
-            # --- Fetch Lookback for Test/Val ---
-            # We need previous (time_steps-1) rows to predict the first test/val point
-            lookback = time_steps - 1
-            
-            # Helper to fetch expanded data
-            def get_expanded_data(indices, df_full, lookback_amount):
-                if len(indices) == 0:
-                    return None, None
-                
-                # Convert Timestamp to integer position
-                start_date = indices[0]
-                end_date = indices[-1]
-                
-                # Handle potential duplicate indices or non-unique (though unlikely here)
-                # Use searchsorted if monotonic, or get_loc
-                try:
-                    start_pos = df_full.index.get_loc(start_date)
-                    end_pos = df_full.index.get_loc(end_date)
-                except KeyError:
-                    # Fallback if somehow index not found (should not happen)
-                    return None, None
-                
-                # get_loc might return slice for duplicates, take start/stop
-                if isinstance(start_pos, slice):
-                    start_pos = start_pos.start
-                if isinstance(end_pos, slice):
-                    end_pos = end_pos.stop - 1 # inclusive
-                if hasattr(start_pos, '__iter__'): # boolean mask or array
-                     start_pos = start_pos[0]
-                if hasattr(end_pos, '__iter__'):
-                     end_pos = end_pos[-1]
-                
-                # Ensure we don't go below 0
-                expanded_start = max(0, start_pos - lookback_amount)
-                
-                # Slice range
-                X_expanded = df_full.iloc[expanded_start : end_pos + 1][feature_cols]
-                y_expanded = df_full.iloc[expanded_start : end_pos + 1][target_col]
-                return X_expanded, y_expanded
-
-            # Expand Test
-            X_test_dl, y_test_dl = get_expanded_data(test_idx, df, lookback)
-            
-            # Expand Val if exists
-            X_val_dl = None
-            y_val_dl = None
-            if has_val_set and len(val_idx) > 0:
-                X_val_dl, y_val_dl = get_expanded_data(val_idx, df, lookback)
-
-            # Scale features
-            scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
-            
-            # Transform Test/Val using expanded data
-            X_test_scaled = scaler.transform(X_test_dl)
-            
-            # Scale targets
-            if scaling_mode == "vol_scale":
                 y_train_scaled = y_train / y_std
-                y_test_scaled = y_test_dl / y_std
+                y_test_scaled = y_test / y_std
             else:
+                # Standardize: (y - mean) / std
                 y_mean = y_train.mean()
                 y_train_scaled = (y_train - y_mean) / y_std
-                y_test_scaled = (y_test_dl - y_mean) / y_std
+                y_test_scaled = (y_test - y_mean) / y_std
+            
+            print(f"  Fold {fold} target scaling ({scaling_mode}): y_mean={y_mean:.6f}, y_std={y_std:.6f}")
+            
+            # 2. Scale Features (Fit on Train, Transform on Test)
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled = scaler.transform(X_test)
             
             # 3. Reshape to 3D Sequences (using scaled targets)
             X_train_seq, y_train_seq = lstm_dataset.create_sequences(X_train_scaled, y_train_scaled.values, time_steps)
-            # Use expanded test data for sequences
             X_test_seq, y_test_seq = lstm_dataset.create_sequences(X_test_scaled, y_test_scaled.values, time_steps)
             
-            # Verify lengths
-            # Expected len = len(test_idx)
-            # if len(X_test_seq) != len(test_idx):
-            #     print(f"Warning: Test Sequence len {len(X_test_seq)} != Test Set len {len(test_idx)}")
-            
-            # Check if sequences are empty
+            # Check if sequences are empty (e.g. if fold is too small)
             if len(X_train_seq) == 0 or len(X_test_seq) == 0:
                 print(f"Fold {fold}: Skipping due to insufficient data for sequence generation.")
                 continue
             
             # 4. Create DataLoader (use tuned batch_size if available)
             if config.MODEL_TYPE == 'LSTM':
-                batch_size = best_params.get('batch_size', lstm_config_overrides.get('batch_size', config.LSTM_BATCH_SIZE))
+                batch_size = best_params.get('batch_size', config.LSTM_BATCH_SIZE)
             elif config.MODEL_TYPE == 'CNN':
                 batch_size = best_params.get('batch_size', config.CNN_BATCH_SIZE)
             elif config.MODEL_TYPE == 'Transformer':
                 batch_size = best_params.get('batch_size', config.TRANSFORMER_BATCH_SIZE)
-            elif config.MODEL_TYPE == 'TFT':
-                batch_size = best_params.get('batch_size', 32)
             train_loader = lstm_dataset.prepare_dataloader(X_train_seq, y_train_seq, batch_size=batch_size)
             
             # 4b. Prepare Validation DataLoader for Early Stopping (if available)
@@ -474,14 +305,14 @@ def main():
                       f"len(X_val_orig)={len(X_val_orig) if X_val_orig is not None else 0}, "
                       f"time_steps={time_steps}, has_val={has_val}")
             if has_val:
-                # Use expanded Val data
-                X_val_scaled = scaler.transform(X_val_dl)
+                # Scale val features using train-fitted scaler
+                X_val_scaled = scaler.transform(X_val_orig)
                 
                 # Scale val targets using train stats
                 if scaling_mode == "vol_scale":
-                    y_val_scaled = y_val_dl / y_std
+                    y_val_scaled = y_val_orig / y_std
                 else:
-                    y_val_scaled = (y_val_dl - y_mean) / y_std
+                    y_val_scaled = (y_val_orig - y_mean) / y_std
                 
                 # Create sequences for val
                 X_val_seq, y_val_seq = lstm_dataset.create_sequences(X_val_scaled, y_val_scaled.values, time_steps)
@@ -498,13 +329,13 @@ def main():
             weight_decay = 0
             if config.MODEL_TYPE == 'LSTM':
                 # Apply tuned params to LSTM model
-                hidden_dim = best_params.get('hidden_dim', lstm_config_overrides.get('hidden_dim', config.LSTM_HIDDEN_DIM))
-                num_layers = best_params.get('num_layers', lstm_config_overrides.get('num_layers', config.LSTM_LAYERS))
-                dropout = best_params.get('dropout', lstm_config_overrides.get('dropout', 0.2))
+                hidden_dim = best_params.get('hidden_dim', config.LSTM_HIDDEN_DIM)
+                num_layers = best_params.get('num_layers', config.LSTM_LAYERS)
+                dropout = best_params.get('dropout', 0.2)
                 from ML.models import LSTMModel
                 model = LSTMModel(input_dim, hidden_dim, num_layers, output_dim=1, dropout=dropout)
-                lr = best_params.get('lr', lstm_config_overrides.get('lr', config.LSTM_LEARNING_RATE))
-                epochs = lstm_config_overrides.get('epochs', config.LSTM_EPOCHS)
+                lr = best_params.get('lr', config.LSTM_LEARNING_RATE)
+                epochs = config.LSTM_EPOCHS
             elif config.MODEL_TYPE == 'CNN':
                 # Apply tuned params to CNN model
                 filters = best_params.get('filters', config.CNN_FILTERS)
@@ -515,16 +346,6 @@ def main():
                 model = CNN1DModel(input_dim, filters, kernel_size, num_layers, dropout=dropout, output_dim=1)
                 lr = best_params.get('lr', config.CNN_LEARNING_RATE)
                 epochs = config.CNN_EPOCHS
-            elif config.MODEL_TYPE == 'TFT':
-                # Apply tuned params to TFT model
-                hidden_dim = best_params.get('hidden_dim', config.TFT_HIDDEN_DIM)
-                num_heads = best_params.get('num_heads', config.TFT_NUM_HEADS)
-                num_layers = best_params.get('num_layers', config.TFT_LAYERS)
-                dropout = best_params.get('dropout', config.TFT_DROPOUT)
-                from ML.tft_model import TFTModel
-                model = TFTModel(input_dim, hidden_dim, num_heads, num_layers, dropout=dropout, output_dim=1)
-                lr = best_params.get('lr', 1e-3)
-                epochs = getattr(config, 'TFT_EPOCHS', 50)
             elif config.MODEL_TYPE == 'Transformer':
                 # Apply tuned params to Transformer model
                 model_dim = best_params.get('model_dim', config.TRANSFORMER_MODEL_DIM)
@@ -571,14 +392,12 @@ def main():
             patience_counter = 0
             best_model_state = None  # To save the best weights
             
-            model.to(device)
             model.train()
             
             for epoch in range(epochs):
                 # 1. Training Step
                 epoch_loss = 0.0
                 for X_batch, y_batch in train_loader:
-                    X_batch, y_batch = X_batch.to(device), y_batch.to(device)
                     optimizer.zero_grad()
                     outputs = model(X_batch)
                     loss = utils.compute_loss(
@@ -603,7 +422,6 @@ def main():
                     val_loss_sum = 0.0
                     with torch.no_grad():
                         for X_v, y_v in val_loader:
-                            X_v, y_v = X_v.to(device), y_v.to(device)
                             out_v = model(X_v)
                             loss_v = utils.compute_loss(
                                 y_pred=out_v,
@@ -650,34 +468,34 @@ def main():
             model.eval()
             with torch.no_grad():
                 # Predict on train set
-                X_train_tensor = torch.tensor(X_train_seq, dtype=torch.float32).to(device)
-                y_train_pred_scaled = model(X_train_tensor).cpu().numpy().flatten()
+                X_train_tensor = torch.tensor(X_train_seq, dtype=torch.float32)
+                y_train_pred_scaled = model(X_train_tensor).numpy().flatten()
                 y_train_pred = y_train_pred_scaled * y_std + y_mean
                 y_train_actual = y_train.iloc[time_steps-1:].values
                 
                 # Predict on test set
-                X_test_tensor = torch.tensor(X_test_seq, dtype=torch.float32).to(device)
-                y_pred_scaled = model(X_test_tensor).cpu().numpy().flatten()
+                X_test_tensor = torch.tensor(X_test_seq, dtype=torch.float32)
+                y_pred_scaled = model(X_test_tensor).numpy().flatten()
             
             # Unscale predictions back to original scale
             # For vol_scale: y_mean is 0.0, so this simplifies to y_pred * y_std
             # For standardize: y_pred * y_std + y_mean
             y_pred = y_pred_scaled * y_std + y_mean
                 
-            # Adjust Actuals - NO slicing needed for test/val as we expanded inputs!
-            # y_test = y_test.iloc[time_steps-1:] 
+            # Adjust Actuals (slice off first time_steps-1) - use raw y_test for metrics
+            y_test = y_test.iloc[time_steps-1:]
             
             # --- Compute Validation Metrics if val set is available ---
             y_val_pred, y_val_actual = None, None
-            if has_val_set and X_val_dl is not None:
-                # Use expanded Val data so we don't lose the first few samples
-                X_val_scaled = scaler.transform(X_val_dl)
+            if has_val_set and X_val_orig is not None and len(X_val_orig) >= time_steps:
+                # Scale val features using train-fitted scaler
+                X_val_scaled = scaler.transform(X_val_orig)
                 
                 # Scale val targets using train stats
                 if scaling_mode == "vol_scale":
-                    y_val_scaled = y_val_dl / y_std
+                    y_val_scaled = y_val_orig / y_std
                 else:
-                    y_val_scaled = (y_val_dl - y_mean) / y_std
+                    y_val_scaled = (y_val_orig - y_mean) / y_std
                 
                 # Create sequences for val
                 X_val_seq, _ = lstm_dataset.create_sequences(X_val_scaled, y_val_scaled.values, time_steps)
@@ -685,16 +503,14 @@ def main():
                 if len(X_val_seq) > 0:
                     # Predict on val
                     with torch.no_grad():
-                        X_val_tensor = torch.tensor(X_val_seq, dtype=torch.float32).to(device)
-                        y_val_pred_scaled = model(X_val_tensor).cpu().numpy().flatten()
+                        X_val_tensor = torch.tensor(X_val_seq, dtype=torch.float32)
+                        y_val_pred_scaled = model(X_val_tensor).numpy().flatten()
                     
                     # Unscale val predictions
                     y_val_pred = y_val_pred_scaled * y_std + y_mean
                     
-                    # Actuals match predictions (full val set)
-                    # Because we used expanded inputs, the outputs align exactly with y_val_orig
-                    y_val_actual = y_val_orig.values 
-
+                    # Slice val actuals to match sequence output
+                    y_val_actual = y_val_orig.iloc[time_steps-1:].values
             
         else:
             # --- Standard ML Training ---
@@ -756,34 +572,18 @@ def main():
             
             model_params = resolve_model_params(config.MODEL_TYPE, best_params)
             model = models.ModelFactory.get_model(config.MODEL_TYPE, overrides=model_params)
-            
             model.fit(X_train, y_train)
             
-            # --- Capture Feature Importance (if available) ---
-            try:
-                if hasattr(model, 'feature_importances_'):
-                    all_feature_importances.append(model.feature_importances_)
-                elif hasattr(model, 'coef_'):
-                    all_feature_importances.append(model.coef_)
-                # Deep Learning models require permutation importance - skipping for speed
-            except Exception as e:
-                print(f"Could not extract feature importance: {e}")
-
-            # --- Compute Validation Metrics for standard ML if val set is available ---
-            y_val_pred, y_val_actual = None, None
-            if has_val_set and X_val_orig is not None and len(X_val_orig) > 0:
-                # If model has optimization hook, run it now (e.g. RidgeResidualXGB)
-                if hasattr(model, 'optimize_mixing'):
-                    print("  Optimizing mixing parameter on validation set...")
-                    model.optimize_mixing(X_val_orig, y_val_orig)
-                    
-                y_val_pred = model.predict(X_val_orig)
-                y_val_actual = y_val_orig.values
-
-            # Predict on train and test sets (AFTER potential optimization)
+            # Predict on train, val, and test sets
             y_train_pred = model.predict(X_train)
             y_train_actual = y_train.values if hasattr(y_train, 'values') else y_train
             y_pred = model.predict(X_test)
+            
+            # --- Compute Validation Metrics for standard ML if val set is available ---
+            y_val_pred, y_val_actual = None, None
+            if has_val_set and X_val_orig is not None and len(X_val_orig) > 0:
+                y_val_pred = model.predict(X_val_orig)
+                y_val_actual = y_val_orig.values
         
         # Store predictions and actuals
         if y_train_pred is not None and y_train_actual is not None:
@@ -792,128 +592,13 @@ def main():
         all_preds.extend(y_pred)
         all_actuals.extend(y_test)
         
-
-
-        # --- Stack Decomposition Collection ---
-        if hasattr(model, 'predict_decomposition'):
-            # 1. Test Set Decomp
-            decomp_test = model.predict_decomposition(X_test)
-            
-            # --- Stack Audit Assertions (Fail Fast) ---
-            selected_lambda = decomp_test['lambda']
-            print(f"  [Fold Audit] Selected Lambda: {selected_lambda}")
-            
-            # 1. Assert Lambda exists
-            if selected_lambda is None:
-                raise RuntimeError(f"Fold {fold+1}: CRITICAL FAILURE - Selected Lambda is missing!")
-            
-            # 2. Check Stack Activity (only if lambda > 0)
-            if selected_lambda > 0:
-                resid_preds = decomp_test['resid_pred']
-                resid_std = np.nanstd(resid_preds)
-                if resid_std == 0:
-                     raise RuntimeError(f"Fold {fold+1}: Residual model produced zero-variance predictions (std=0) despite lambda={selected_lambda}!")
-                
-                # We assert that final_pred differs from ridge_pred
-                if np.allclose(decomp_test['final_pred'], decomp_test['ridge_pred']):
-                    raise RuntimeError(f"Fold {fold+1}: Stack inactive: final_pred == ridge_pred! Residual contribution is effectively zero.")
-            
-            # 4. Verify Final Prediction Logic
-            # Ensure the 'y_pred' we use for metrics IS the 'final_pred' from decomposition
-            if not np.allclose(y_pred, decomp_test['final_pred']):
-                 diff = np.abs(y_pred - decomp_test['final_pred'])
-                 max_diff = np.max(diff)
-                 mean_diff = np.mean(diff)
-                 print(f"  [CRITICAL DEBUG] Prediction Mismatch detected in Fold {fold+1}")
-                 print(f"  y_pred shape: {y_pred.shape}, decomp shape: {decomp_test['final_pred'].shape}")
-                 print(f"  Max Diff: {max_diff:.8f}, Mean Diff: {mean_diff:.8f}")
-                 print(f"  y_pred snippet: {y_pred[:5]}")
-                 print(f"  decomp snippet: {decomp_test['final_pred'][:5]}")
-                 
-                 # If difference is purely floating point noise but allclose failed (maybe strict logic?), strictly enforce consistency
-                 # But if shapes mismatch or diff is large, raise error.
-                 if max_diff > 1e-5:
-                     raise RuntimeError(f"Fold {fold+1}: Critical Logic Error - model.predict() does not match decomposition final_pred! Max Diff: {max_diff}")
-                 else:
-                     print(f"  [WARNING] Small floating point mismatch ({max_diff}). overwriting y_pred with decomp final_pred for consistency.")
-                     y_pred = decomp_test['final_pred']
-
-            # --- Log Detailed Prediction DataFrame (Per Fold) ---
-            fold_stack_data = []
-            for i, idx in enumerate(test_idx):
-                row = {
-                    'date': idx,
-                    'y_true': y_test.iloc[i],
-                    'ridge_pred': decomp_test['ridge_pred'][i],
-                    'resid_pred': decomp_test['resid_pred'][i],
-                    'final_pred': decomp_test['final_pred'][i],
-                    'lambda_selected': selected_lambda,
-                    'split': 'test',
-                    'fold': fold + 1
-                }
-                fold_stack_data.append(row)
-                all_stack_predictions.append(row) # Keep for aggregate
-            
-            # Save per-fold audit file immediately
-            fold_audit_df = pd.DataFrame(fold_stack_data)
-            audit_path = os.path.join(logger.run_dir, f"fold_{fold+1}_stack_audit.csv")
-            fold_audit_df.to_csv(audit_path, index=True) # Index is date from row dict? No, row dict has 'date' col.
-            # actually row['date'] is the index value. 
-            
-            
-            # 2. Validation Set Decomp (if available)
-            if has_val_set and X_val_orig is not None:
-                 decomp_val = model.predict_decomposition(X_val_orig)
-                 for i, idx in enumerate(val_idx):
-                    row = {
-                        'date': idx,
-                        'y_true': y_val_orig.iloc[i],
-                        'ridge_pred': decomp_val['ridge_pred'][i],
-                        'resid_pred': decomp_val['resid_pred'][i],
-                        'final_pred': decomp_val['final_pred'][i],
-                        'lambda_selected': decomp_val['lambda'],
-                        'split': 'validation',
-                        'fold': fold + 1
-                    }
-                    all_stack_predictions.append(row)
-
-            # 3. Train Set Decomp (Optional - can be large, maybe sample or skip?)
-            # Let's collect it for full analysis as requested.
-            decomp_train = model.predict_decomposition(X_train)
-            for i, idx in enumerate(train_idx):
-                # Handle merged train+val case where train_idx might not match X_train rows exactly 
-                # if we didn't carefully track indices. 
-                # Actually X_train indices are preserved.
-                current_date = X_train.index[i]
-                row = {
-                    'date': current_date,
-                    'y_true': y_train.iloc[i],
-                    'ridge_pred': decomp_train['ridge_pred'][i],
-                    'resid_pred': decomp_train['resid_pred'][i],
-                    'final_pred': decomp_train['final_pred'][i],
-                    'lambda_selected': decomp_train['lambda'],
-                    'split': 'train',
-                    'fold': fold + 1
-                }
-                all_stack_predictions.append(row)
-        
-        # Collect regime labels for test set
-        if regime_col and regime_col in df.columns:
-            # Re-fetch based on test_idx to ensure alignment
-            # Note: df.loc[test_idx] might return different structure if test_idx is list vs slice
-            # But here df is consistent.
-            fold_regimes = df.loc[test_idx, regime_col].values
-            all_regimes.extend(fold_regimes)
-        else:
-            # Pad with NaNs if not available
-            all_regimes.extend([np.nan] * len(y_test))
-        
         # Store test dates for monthly execution mode
         # Get dates from df index using test_idx
         try:
             # test_idx should be integer positions, use them to index df
             if hasattr(test_idx, '__iter__') and not isinstance(test_idx, str):
                 # Convert to list if it's a range or other iterable
+                import pandas as pd
                 if isinstance(test_idx, (list, np.ndarray)) or (hasattr(pd, 'Index') and isinstance(test_idx, pd.Index)):
                     test_dates = df.index[test_idx]
                     all_test_dates.extend(test_dates.tolist())
@@ -1076,195 +761,54 @@ def main():
                     'val_big_down_recall': val_tail['recall_down_strict']
                 })
                 
-                # --- Policy Selection (Threshold vs Continuous) ---
-                policy_mode = getattr(config, 'POLICY_MODE', 'threshold')
-                
-                if policy_mode == 'monthly_continuous':
-                    # Continuous Policy with K-tuning
+                # --- Per-Fold Threshold Tuning (Anti-Policy-Overfit) ---
+                if config.WF_TUNE_THRESHOLD:
+                    # Get val dates for monthly execution mode
+                    val_dates = None
+                    if execution_frequency == "monthly":
+                        try:
+                            # Try to get dates from y_val_orig index first (most reliable)
+                            if hasattr(y_val_orig, 'index') and len(y_val_orig.index) == len(y_val_actual):
+                                val_dates = pd.DatetimeIndex(y_val_orig.index)
+                            # Otherwise try to get from df using val_idx
+                            elif hasattr(val_idx, '__len__') and len(val_idx) > 0:
+                                idx_list = list(val_idx) if not isinstance(val_idx, (list, np.ndarray)) else val_idx
+                                val_dates = pd.DatetimeIndex(df.index[idx_list])
+                        except Exception as e:
+                            print(f"  Warning: Could not collect val dates for fold {fold}: {e}")
+                            val_dates = None
                     
-                    # 1. Calculate stats on Training Set (Standardization Base)
-                    # We use predictions made on the training set (from decomp_train if available, 
-                     # otherwise we need to generate them, but we did generate decomp_train earlier)
-                    
-                    # Note: all_stack_predictions contains train preds for this fold. 
-                    # We can filter 'decomp_train' dictionary if we held onto it, 
-                    # or filter the temporary list 'fold_stack_data' but that's only test.
-                    # We have 'y_train_pred' variable earlier in loop!
-                    
-                    if y_train_pred is not None and len(y_train_pred) > 10:
-                        train_mean = np.mean(y_train_pred)
-                        train_std = np.std(y_train_pred)
-                        if train_std < 1e-8: train_std = 1.0 # avoid div/0
-                    else:
-                        train_mean = 0.0
-                        train_std = 1.0
-                        
-                    # 2. Compute Z-scores
-                    z_val = (y_val_pred - train_mean) / train_std
-                    z_test = (y_pred_arr - train_mean) / train_std
-                    
-                    # 3. Tune k on Validation
-                    k_grid = getattr(config, 'POLICY_K_GRID', [0.5, 1.0, 1.5])
-                    tuned_res = metrics.optimize_continuous_k(
-                        y_val_actual, z_val, k_grid=k_grid, 
+                    tuned_result = metrics.tune_and_evaluate_fold(
+                        y_val_true=y_val_actual,
+                        y_val_pred=y_val_pred,
+                        y_test_true=y_test_arr,
+                        y_test_pred=y_pred_arr,
+                        criterion=config.WF_THRESHOLD_CRITERION,
+                        n_grid_points=config.WF_THRESHOLD_N_GRID,
+                        min_trade_fraction=config.WF_THRESHOLD_MIN_TRADE_FRAC,
+                        frequency=frequency,
+                        apply_vol_targeting=config.WF_THRESHOLD_VOL_TARGETING,
+                        val_dates=val_dates,
+                        test_dates=fold_test_dates,
                         execution_frequency=execution_frequency
                     )
-                    best_k = tuned_res['best_k']
                     
-                    print(f"  [Policy Tuning] Continuous Mode: Train μ={train_mean:.4f}, σ={train_std:.4f} | Best k={best_k} (Val Sharpe: {tuned_res['best_sharpe']:.2f})")
+                    # Log the tuned threshold for this fold
+                    tuned_tau = tuned_result['tuned_threshold']
+                    tuned_test_sharpe = tuned_result['test_metrics']['sharpe']
+                    print(f"  [Threshold Tuning] τ={tuned_tau:.4f} → Test Sharpe={tuned_test_sharpe:.2f}")
                     
-                    # 4. Apply Policy to Test
-                    # Position = clip(k * z_test, -1, 1)
-                    # We override the implicit "strategy metrics" calculated earlier which assumed sign-based or standard logic
-                    # We need to re-calculate strategy metrics with these specific continuous weights
-                    
-                    test_pos = np.clip(best_k * z_test, -1.0, 1.0)
-                    
-                    # Re-calc strategy metrics with continuous positions
-                    # metrics.calculate_strategy_metrics supports 'positions' arg if we modify it, 
-                    # OR we can just calc Sharpe manually here and store it.
-                    # The standard calculate_strategy_metrics assumes pos = sign(pred) if no positions given.
-                    # Let's check metrics.py to see if it supports explicit positions. 
-                    # It likely doesn't support passing positions directly yet. 
-                    # We might need to quickly robustify calculate_strategy_metrics or calc manually.
-                    
-                    # Manual Calc for Fold Entry
-                    test_ret = test_pos * y_test_arr
-                    ann_factor = metrics.get_annualization_factor(execution_frequency)
-                    if np.std(test_ret) > 1e-8:
-                        cont_sharpe = (np.mean(test_ret) / np.std(test_ret)) * np.sqrt(ann_factor)
-                    else:
-                        cont_sharpe = 0.0
-                        
+                    # Add to fold entry
                     fold_entry.update({
-                        'policy_mode': 'continuous',
-                        'tuned_k': best_k,
-                        'train_mean': train_mean,
-                        'train_std': train_std,
-                        'continuous_sharpe': cont_sharpe,
-                        'tuned_val_sharpe': tuned_res['best_sharpe']
+                        'tuned_threshold': tuned_tau,
+                        'tuned_val_sharpe': tuned_result['val_metrics']['sharpe'],
+                        'tuned_test_sharpe': tuned_test_sharpe,
+                        'tuned_test_return': tuned_result['test_metrics']['total_return'],
+                        'tuned_test_hit_rate': tuned_result['test_metrics']['hit_rate'],
+                        'tuned_test_trades': tuned_result['test_metrics']['trade_count']
                     })
-
-                    # --- Regime Risk Cap ---
-                    # Logic: if regime == 0 (Low Vol/Target), apply cap.
-                    regime_oracle_col = getattr(config, 'REGIME_ORACLE_COL', 'RV_Ratio')
-                    regime_cap_grid = getattr(config, 'REGIME_RISK_CAP_GRID', None)
                     
-                    if regime_cap_grid is not None and regime_oracle_col in df.columns:
-                        # Establish Regime Threshold (similar to RegimeGated logic)
-                        # Use model's threshold if available, else derive from Training Data median
-                        regime_thresh = None
-                        if hasattr(model, 'regime_threshold'):
-                            regime_thresh = model.regime_threshold
-                        else:
-                            # Derive from training data (fold-pure) if col exists
-                            if regime_oracle_col in X_train.columns:
-                                regime_thresh = X_train[regime_oracle_col].median()
-                            else:
-                                # Fallback if not in X_train (unlikely if in df)
-                                regime_thresh = df[regime_oracle_col].iloc[train_idx].median()
-                        
-                        if regime_thresh is not None:
-                            # Generate Regime Signals (0 = Low/Target, 1 = High/Other)
-                            # Note: User request: "if regime==0". Usually 0 is Low Vol (below thresh).
-                            
-                            # Get Val Regimes
-                            if regime_oracle_col in X_val_orig.columns:
-                                val_regime_vals = X_val_orig[regime_oracle_col]
-                            else:
-                                val_regime_vals = df[regime_oracle_col].iloc[val_idx]
-                            
-                            val_regimes = (val_regime_vals > regime_thresh).astype(int)
-                            
-                            # Get Test Regimes
-                            if regime_oracle_col in X_test.columns:
-                                test_regime_vals = X_test[regime_oracle_col]
-                            else:
-                                test_regime_vals = df[regime_oracle_col].iloc[test_idx]
-                                
-                            test_regimes = (test_regime_vals > regime_thresh).astype(int)
-                            
-                            # Tune Cap on Val (using the positions we just calculated: test_pos is for test, need val_pos)
-                            # We need val positions first.
-                            z_val = (y_val_pred - train_mean) / train_std
-                            val_pos = np.clip(best_k * z_val, -1.0, 1.0)
-                            
-                            cap_res = metrics.optimize_regime_cap(
-                                y_val_actual, val_pos, val_regimes, 
-                                cap_grid=regime_cap_grid, execution_frequency=execution_frequency
-                            )
-                            best_cap = cap_res['best_cap']
-                            
-                            print(f"  [Regime Cap] Threshold={regime_thresh:.4f} | Best Cap={best_cap} (Val Sharpe: {cap_res['best_sharpe']:.2f})")
-                            
-                            # Apply to Test
-                            test_pos_capped = test_pos.copy()
-                            test_pos_capped[test_regimes == 0] *= best_cap
-                            
-                            # Re-calc Sharpe with Capped Positions
-                            capped_ret = test_pos_capped * y_test_arr
-                            if np.std(capped_ret) > 1e-8:
-                                capped_sharpe = (np.mean(capped_ret) / np.std(capped_ret)) * np.sqrt(ann_factor)
-                            else:
-                                capped_sharpe = 0.0
-                                
-                            fold_entry.update({
-                                'regime_cap': best_cap,
-                                'regime_threshold': regime_thresh,
-                                'capped_sharpe': capped_sharpe,
-                                'uncapped_sharpe': cont_sharpe # Keep original for comparison
-                            })
-                    
-                else:
-                    # Default Threshold Tuning Logic (Original)
-                    if config.WF_TUNE_THRESHOLD:
-                        # Get val dates for monthly execution mode
-                        val_dates = None
-                        if execution_frequency == "monthly":
-                            try:
-                                # Try to get dates from y_val_orig index first (most reliable)
-                                if hasattr(y_val_orig, 'index') and len(y_val_orig.index) == len(y_val_actual):
-                                    val_dates = pd.DatetimeIndex(y_val_orig.index)
-                                # Otherwise try to get from df using val_idx
-                                elif hasattr(val_idx, '__len__') and len(val_idx) > 0:
-                                    idx_list = list(val_idx) if not isinstance(val_idx, (list, np.ndarray)) else val_idx
-                                    val_dates = pd.DatetimeIndex(df.index[idx_list])
-                            except Exception as e:
-                                print(f"  Warning: Could not collect val dates for fold {fold}: {e}")
-                                val_dates = None
-                        
-                        tuned_result = metrics.tune_and_evaluate_fold(
-                            y_val_true=y_val_actual,
-                            y_val_pred=y_val_pred,
-                            y_test_true=y_test_arr,
-                            y_test_pred=y_pred_arr,
-                            criterion=config.WF_THRESHOLD_CRITERION,
-                            n_grid_points=config.WF_THRESHOLD_N_GRID,
-                            min_trade_fraction=config.WF_THRESHOLD_MIN_TRADE_FRAC,
-                            frequency=frequency,
-                            apply_vol_targeting=config.WF_THRESHOLD_VOL_TARGETING,
-                            val_dates=val_dates,
-                            test_dates=fold_test_dates,
-                            execution_frequency=execution_frequency
-                        )
-                        
-                        # Log the tuned threshold for this fold
-                        tuned_tau = tuned_result['tuned_threshold']
-                        tuned_test_sharpe = tuned_result['test_metrics']['sharpe']
-                        print(f"  [Threshold Tuning] τ={tuned_tau:.4f} → Test Sharpe={tuned_test_sharpe:.2f}")
-                        
-                        # Add to fold entry
-                        fold_entry.update({
-                            'policy_mode': 'threshold',
-                            'tuned_threshold': tuned_tau,
-                            'tuned_val_sharpe': tuned_result['val_metrics']['sharpe'],
-                            'tuned_test_sharpe': tuned_test_sharpe,
-                            'tuned_test_return': tuned_result['test_metrics']['total_return'],
-                            'tuned_test_hit_rate': tuned_result['test_metrics']['hit_rate'],
-                            'tuned_test_trades': tuned_result['test_metrics']['trade_count']
-                        })
-                        
-                        threshold_tuning_results.append(tuned_result)
+                    threshold_tuning_results.append(tuned_result)
             
             fold_metrics_list.append(fold_entry)
         
@@ -1288,6 +832,7 @@ def main():
     # Prepare dates for monthly execution mode
     test_dates = None
     if execution_frequency == "monthly" and len(all_test_dates) > 0:
+        import pandas as pd
         if isinstance(all_test_dates[0], pd.Timestamp):
             test_dates = pd.DatetimeIndex(all_test_dates)
         else:
@@ -1336,19 +881,6 @@ def main():
     )
     metrics.print_signal_concentration_report(signal_concentration, title="Signal Concentration Analysis (Aggregated)")
     
-    # --- Regime-Conditional Analysis ---
-    regime_metrics = None
-    if len(all_regimes) > 0 and not all(np.isnan(all_regimes)):
-         # Use the regime_col determined at start of main()
-         regime_metrics = metrics.calculate_regime_metrics(
-             all_actuals, all_preds, all_regimes, 
-             regime_col_name=regime_col or "Regime"
-         )
-         # Print brief summary to console
-         print(f"\n--- Regime Breakdown ({regime_metrics.get('regime_col')}) ---")
-         for r, m in regime_metrics['breakdown'].items():
-             print(f"  Regime {r}: IC={m['ic']:.4f}, Hit Rate={m['hit_rate']:.1%}, Count={m['count']}")
-    
     # --- Per-Fold Signal Quality Summary ---
     if len(fold_metrics_list) > 0:
         fold_ics = [f['ic'] for f in fold_metrics_list if 'ic' in f]
@@ -1385,127 +917,34 @@ def main():
             title=f"Threshold-Tuned Thresholded Policy (criterion={config.WF_THRESHOLD_CRITERION})"
         )
     
-    # --- Feature Importance Analysis ---
-    if len(all_feature_importances) > 0:
-        try:
-            # Stack and average
-            avg_importance = np.mean(np.array(all_feature_importances), axis=0)
-            
-            # Create DataFrame
-            fi_df = pd.DataFrame({
-                'Feature': feature_cols,
-                'Importance': avg_importance
-            })
-            
-            # Sort by absolute importance
-            fi_df['AbsImportance'] = fi_df['Importance'].abs()
-            fi_df = fi_df.sort_values('AbsImportance', ascending=False).drop('AbsImportance', axis=1)
-            
-            # Save CSV
-            fi_path = os.path.join(logger.run_dir, "feature_importance.csv")
-            fi_df.to_csv(fi_path, index=False)
-            print(f"✅ Feature importance saved to: {fi_path}")
-            
-            # Plot Top 20
-            top_n = 20
-            plot_df = fi_df.head(top_n).iloc[::-1] # Reverse for barh
-            
-            fig_fi = plt.figure(figsize=(12, 10))
-            plt.barh(plot_df['Feature'], plot_df['Importance'], color='#1f77b4')
-            plt.title(f"Top {top_n} Feature Importance (Avg over {len(all_feature_importances)} folds)", fontsize=14)
-            plt.xlabel("Importance Score")
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            logger.save_plot(fig_fi, filename="feature_importance.png")
-            print(f"✅ Feature importance plot saved to: feature_importance.png")
-        except Exception as e:
-            print(f"Failed to generate feature importance plot: {e}")
-
-    # 4. Plot - Test Set (using Dates and Equity Curve)
-    
-    # Ensure we have proper dates for plotting
-    plot_dates = None
-    if len(all_test_dates) == len(all_actuals):
-        plot_dates = pd.to_datetime(all_test_dates)
-    else:
-        # Fallback to range index but try to be smart
-        print(f"Warning: Date count ({len(all_test_dates)}) != Actuals ({len(all_actuals)}). Using numeric index for X-axis.")
-        plot_dates = range(len(all_actuals))
-
-    # --- Plot 1: Returns Forecast (Original) ---
-    # Increased figsize to prevent squished look
-    fig = plt.figure(figsize=(24, 8)) 
-    plt.plot(plot_dates, all_actuals, label='Actual Return', alpha=0.5, color='gray')
-    plt.plot(plot_dates, all_preds, label='Predicted Return', alpha=0.8, color='#1f77b4')
-    plt.title(f"Walk-Forward Forecast: {config.MODEL_TYPE} (Test Set)", fontsize=14)
-    plt.ylabel("Return", fontsize=12)
-    plt.xlabel("Date", fontsize=12)
-    plt.legend(loc='upper left')
-    plt.grid(True, alpha=0.3)
+    # 4. Plot - Test Set (keep original filename for backward compatibility)
+    fig = plt.figure(figsize=(12, 6))
+    plt.plot(all_actuals, label='Actual', alpha=0.7)
+    plt.plot(all_preds, label='Predicted (Walk-Forward)', alpha=0.7)
+    plt.title(f"Walk-Forward Test Set: {config.MODEL_TYPE}")
+    plt.legend()
+    plt.grid(True)
     logger.save_plot(fig, filename="forecast_plot_walkforward.png")
     
     # Also save with explicit test suffix
     logger.save_plot(fig, filename="forecast_plot_walkforward_test.png")
     
-    # --- Plot 2: Cumulative Returns (Equity Curve / Price Proxy) ---
-    # This addresses "SPY Price Y axis" request
-    try:
-        # Construct equity curves
-        # Market: Buy & Hold
-        market_equity = np.cumprod(1 + all_actuals)
-        
-        # Strategy: Sign-based (Always In)
-        # Use shift(1) logic effectively: In real walk-forward, pred[t] is for return[t]. 
-        # So we trade on pred[t] to catch return[t]?
-        # Note: In standard ML setup here, y is target at t. pred is prediction of y at t.
-        # So returns are realized at t.
-        strat_returns = np.sign(all_preds) * all_actuals
-        strat_equity = np.cumprod(1 + strat_returns)
-        
-        # Big Move Strategy
-        big_move_thresh = getattr(config, 'BIG_MOVE_THRESHOLD', 0.03)
-        bm_signal = np.zeros_like(all_preds)
-        bm_signal[all_preds > big_move_thresh] = 1.0
-        bm_signal[all_preds < -big_move_thresh] = -1.0
-        bm_returns = bm_signal * all_actuals
-        # Fill zeros (cash) with 0 return
-        bm_equity = np.cumprod(1 + bm_returns)
-
-        fig2 = plt.figure(figsize=(24, 8))
-        plt.plot(plot_dates, market_equity, label='SPY Buy & Hold (Price Proxy)', color='black', linewidth=1.5)
-        plt.plot(plot_dates, strat_equity, label='Model L/S Strategy', color='green', linewidth=1.5)
-        plt.plot(plot_dates, bm_equity, label=f'Big Move (>{big_move_thresh:.0%})', color='purple', linewidth=1.5, linestyle='--')
-        
-        plt.title(f"Cumulative Performance (Equity Curve): {config.MODEL_TYPE}", fontsize=14)
-        plt.ylabel("Cumulative Growth ($1 start)", fontsize=12)
-        plt.xlabel("Date", fontsize=12)
-        plt.yscale('log') # Log scale often better for price
-        plt.legend(loc='upper left')
-        plt.grid(True, which="both", ls="-", alpha=0.3)
-        logger.save_plot(fig2, filename="forecast_plot_walkforward_equity.png")
-        print("✅ Saved Equity Curve plot to forecast_plot_walkforward_equity.png")
-    except Exception as e:
-        print(f"Could not plot equity curve: {e}")
-
-    
-    # Plot - Train Set (Wide)
+    # Plot - Train Set
     if len(all_train_preds) > 0 and len(all_train_actuals) > 0:
-        fig = plt.figure(figsize=(24, 8))
-        # No dates available easily for train (as it's concatenated from folds), using index
-        plt.plot(all_train_actuals, label='Actual', alpha=0.5)
+        fig = plt.figure(figsize=(12, 6))
+        plt.plot(all_train_actuals, label='Actual', alpha=0.7)
         plt.plot(all_train_preds, label='Predicted', alpha=0.7)
-        plt.title(f"Walk-Forward Train Set: {config.MODEL_TYPE}", fontsize=14)
+        plt.title(f"Walk-Forward Train Set: {config.MODEL_TYPE}")
         plt.legend()
         plt.grid(True)
         logger.save_plot(fig, filename="forecast_plot_walkforward_train.png")
     
-    # Plot - Validation Set (Wide)
+    # Plot - Validation Set
     if len(all_val_preds) > 0 and len(all_val_actuals) > 0:
-        fig = plt.figure(figsize=(24, 8))
-        # No dates available easily for val, using index
-        plt.plot(all_val_actuals, label='Actual', alpha=0.5)
+        fig = plt.figure(figsize=(12, 6))
+        plt.plot(all_val_actuals, label='Actual', alpha=0.7)
         plt.plot(all_val_preds, label='Predicted', alpha=0.7)
-        plt.title(f"Walk-Forward Validation Set: {config.MODEL_TYPE}", fontsize=14)
+        plt.title(f"Walk-Forward Validation Set: {config.MODEL_TYPE}")
         plt.legend()
         plt.grid(True)
         logger.save_plot(fig, filename="forecast_plot_walkforward_val.png")
@@ -1573,175 +1012,58 @@ def main():
     logger.save_config_json(config.MODEL_TYPE, best_params)
     
     # Log summary with diagnostics
-    # Log summary with diagnostics
-    # --- Stack Decomposition Analysis & Saving ---
-    stack_metrics = None
-    if all_stack_predictions:
-        print("\n--- Stack Decomposition Analysis ---")
-        stack_df = pd.DataFrame(all_stack_predictions)
-        
-        # Save to Parquet
-        stack_save_path = os.path.join(logger.run_dir, "predictions.parquet")
-        stack_df.to_parquet(stack_save_path, index=False)
-        print(f"Stack predictions saved to: {stack_save_path}")
-        
-        # Calculate Metrics on Test Set
-        test_df = stack_df[stack_df['split'] == 'test']
-        if not test_df.empty:
-            # 1. Correlation
-            corr_rr = test_df[['ridge_pred', 'resid_pred']].corr().iloc[0, 1]
-            print(f"Test Set Ridge-Residual Correlation: {corr_rr:.4f}")
-            
-            # 2. Variance Explored
-            # Var(Final) = Var(Ridge) + lambda^2 * Var(Resid) + 2*lambda*Cov(Ridge, Resid)
-            # We calculate this average across folds/rows
-            var_ridge = test_df['ridge_pred'].var()
-            var_resid = test_df['resid_pred'].var()
-            cov_rr = test_df['ridge_pred'].cov(test_df['resid_pred'])
-            # Average lambda used
-            avg_lam = test_df['lambda_selected'].mean() 
-            
-            print(f"Variance Decomp (Est): Var(Ridge)={var_ridge:.6f}, Var(Resid)={var_resid:.6f}, Cov={cov_rr:.6f}")
-            
-            stack_metrics = {
-                'correlation': corr_rr,
-                'var_ridge': var_ridge,
-                'var_resid': var_resid,
-                'cov_rr': cov_rr,
-                'avg_lambda': avg_lam
-            }
-
-    # Log summary with diagnostics
-    # Log summary with diagnostics
-    # 6. Generate Summary Report
-    # Note: Pass fold_metrics_list so the logger can include fold-level statistics
-    # Also pass stack_metrics for stack analysis if available
     logger.log_summary(
-        metrics_train,
-        metrics_val,
-        metrics_test,
-        config.MODEL_TYPE,
-        feature_cols,
-        y_true=all_actuals,  # For distribution plots etc.
+        metrics_train, metrics_val, metrics_test, 
+        config.MODEL_TYPE, feature_cols,
+        y_true=all_actuals, 
         y_pred=all_preds,
         target_scaling_info=None,  # Walk-forward uses per-fold scaling, so no single value
-        fold_metrics=fold_metrics_list,
-        regime_metrics=regime_metrics,
-        stack_metrics=stack_metrics
+        fold_metrics=fold_metrics_list
     )
 
-    # 7. Generate Plots
-    logger.plot_scatter(all_actuals, all_preds, title=f"Predicted vs Actual ({config.MODEL_TYPE})", filename="scatter_plot.png")
-    logger.plot_yearly_scatters(all_test_dates, all_actuals, all_preds, title_prefix=f"Predicted vs Actual ({config.MODEL_TYPE})")
-    
-    # Generate comprehensive boss report (Markdown with Explanations) Complete ---")
-
-    # --- Signal Source Trace & Checking ---
-    print("\n--- Signal Source Trace ---")
-    signal_source_log = "Signal Source: Unknown"
-
-    if hasattr(model, 'predict_decomposition'):
-        # Just check the last fold entry to see if 'final_pred' matches 'y_pred' (which we already asserted per fold)
-        # But user wants explicit confirmation of 'signal_source'
-        
-        # We know we asserted: y_pred == decomp['final_pred'] in standard loop.
-        # Let's perform a global sanity check on the stacked dataframe vs all_preds
-        if stack_metrics:
-            stack_df_check = pd.DataFrame(all_stack_predictions)
-            test_stack = stack_df_check[stack_df_check['split'] == 'test']
-            
-            # Reconstruct all_preds array from the stack trace to match ordering (if dates imply ordering)
-            # Or just check last fold behavior implicitly.
-            
-            # Simple check:
-            # If we are strictly using the code flow, 'y_pred' sent to policies CAME from model.predict().
-            # In RidgeResidualXGB, model.predict() calls self.best_lambda * resid + ridge.
-            # This IS final_pred.
-            
-            signal_source_log = "signal_source = final_pred"
-            print(f"✅ {signal_source_log} (Verified via Stack Decomposition Trace)")
-            
-            # Assertion: If pure Ridge was used by accident
-            # Get a sample
-            sample_ridge = test_stack['ridge_pred'].iloc[0]
-            sample_final = test_stack['final_pred'].iloc[0]
-            
-            # If final differs from ridge, we are using the stack. (Good).
-            # If final == ridge, we might be inactive (lambda=0), which is allowed.
-            
-            # But user said: "fail if policy uses ridge_pred"
-            # This implies if we mistakenly passed 'ridge_pred' column instead of 'final_pred' column.
-            # We passed 'all_preds' array.
-            # Let's verify 'all_preds' is consistent with 'final_pred' column of stack trace.
-            
-            # Note: all_preds is a list of arrays. test_stack['final_pred'] is a series.
-            # They should align perfectly if concatenated in order.
-            
-            # Let's assume alignment for the first 100 samples
-            n_check = min(len(all_preds), len(test_stack))
-            if n_check > 0:
-                 preds_slice = all_preds[:n_check]
-                 stack_slice = test_stack['final_pred'].values[:n_check]
-                 
-                 if not np.allclose(preds_slice, stack_slice, equal_nan=True):
-                     print("❌ CRITICAL: 'all_preds' (used for policy) does NOT match 'final_pred' from stack trace!")
-                     print(f"   Sample Preds: {preds_slice[:5]}")
-                     print(f"   Sample Stack: {stack_slice[:5]}")
-                     signal_source_log = "signal_source = MISMATCH_ERROR"
-                     raise RuntimeError("Critical Signal Trace Failure: Policy is NOT using final_pred!")
-                 else:
-                     # One more check: does it match ridge?
-                     ridge_slice = test_stack['ridge_pred'].values[:n_check]
-                     if np.allclose(preds_slice, ridge_slice, equal_nan=True):
-                         # It matches Ridge.
-                         # Is lambda 0?
-                         avg_lam = test_stack['lambda_selected'].mean()
-                         if avg_lam > 0.01:
-                             # Lambda > 0 but matches Ridge? Suspicious (unless Resids are 0).
-                             # We already failed fast for this inside loops.
-                             pass
-                         else:
-                             signal_source_log = "signal_source = final_pred (inactive_stack)"
-                         
-                         if config.MODEL_TYPE == 'Ridge_Residual_XGB' and avg_lam > 0.01 and not np.allclose(stack_slice, ridge_slice):
-                                # Logic mismatch case
-                                pass
-                         
-            # Summary log line addition
-            try:
-                with open(os.path.join(logger.run_dir, "summary.md"), "a", encoding='utf-8') as f:
-                     f.write(f"\n\n**Signal Trace**: {signal_source_log}\n")
-            except Exception as e:
-                print(f"Warning: Could not append signal trace to summary.md: {e}")
-            
-    else:
-        signal_source_log = "signal_source = ridge_pred" # Or 'model_output'
-        print(f"ℹ️ {signal_source_log} (Single Model)")
-        
-        # Append to summary as well
-        try:
-             with open(os.path.join(logger.run_dir, "summary.md"), "a", encoding='utf-8') as f:
-                 f.write(f"\n\n**Signal Trace**: {signal_source_log}\n")
-        except Exception as e:
-            print(f"Warning: Could not append signal trace to summary.md: {e}")
-
-
+    # --- MongoDB: Save predictions and run metadata ---
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from db_helpers import save_predictions as _save_preds
+        run_id = os.path.basename(logger.run_dir)
+        if len(all_test_dates) > 0:
+            mongo_dates = pd.DatetimeIndex(all_test_dates)
+            min_len = min(len(mongo_dates), len(all_preds), len(all_actuals))
+            mongo_df = pd.DataFrame({
+                'y_pred': all_preds[:min_len],
+                'y_true': all_actuals[:min_len],
+            }, index=mongo_dates[:min_len])
+            run_meta = {
+                'model_type': config.MODEL_TYPE,
+                'process': 'WalkForward',
+                'loss_mode': getattr(config, 'LOSS_MODE', 'mse'),
+                'test_start_date': str(config.TEST_START_DATE),
+                'n_features': len(feature_cols),
+                'n_folds': len(fold_metrics_list),
+                'test_rmse': float(rmse),
+                'test_mae': float(mae),
+                'test_ic': float(ic),
+                'test_dir_acc': float(dir_acc),
+                'test_sharpe': float(strat_metrics.get('sharpe', 0)),
+            }
+            _save_preds(run_id, mongo_df, run_meta)
+    except Exception as _e:
+        print(f"[MongoDB] Warning: Could not save predictions to MongoDB: {_e}")
 
     # --- PREPARE DATA FOR BOSS REPORT ---
     print("\nGenerating Boss Report...")
     
-    # 1. Reload data to ensure we have the raw daily returns (Keep SPY_Price!)
-    full_data_w_returns = data_prep.load_and_prep_data(keep_price=True) 
+    # 1. Reload data to ensure we have the raw daily returns
+    full_data_w_returns = data_prep.load_and_prep_data() 
     
     # 2. Ensure 'Return_1D' exists (Calculated from Price if missing)
     if 'Return_1D' not in full_data_w_returns.columns:
         if 'Adj Close' in full_data_w_returns.columns:
             full_data_w_returns['Return_1D'] = full_data_w_returns['Adj Close'].pct_change()
-        elif 'SPY_Price' in full_data_w_returns.columns:
-            print("Note: Using 'SPY_Price' to calculate daily returns.")
-            full_data_w_returns['Return_1D'] = full_data_w_returns['SPY_Price'].pct_change()
         else:
-            raise ValueError("CRITICAL: Price data (SPY_Price) not found for report generation. Cannot calculate accurate daily returns. Aborting report to prevent misleading 'smoothed' metrics.") 
+            print("Warning: 'Adj Close' not found. Approximating daily returns from target.")
+            full_data_w_returns['Return_1D'] = full_data_w_returns[config.TARGET_COL] / 21.0 
 
     # 3. Align dates and returns
     test_dates = pd.DatetimeIndex(all_test_dates) 
@@ -1758,191 +1080,23 @@ def main():
     # 4. Run the Backtest Engine
     from ML.backtest_engine import BacktestEngine
     
-    # Get feature data for regime analysis (if available)
-    feature_data = None
-    if 'RV_Ratio' in full_data_w_returns.columns:
-        feature_data = full_data_w_returns[['RV_Ratio']].loc[test_dates]
-    
-    
-    # Dynamic Model Description Helper
-    def get_model_description(model_type, params):
-        if 'Regime' in model_type:
-            return (
-                f"Model Type: {model_type}\n"
-                "Mechanism: 'Regime Gated' architecture designed to adapt to changing market conditions.\n"
-                "  - The model monitors market volatility (Realized Volatility Ratio).\n"
-                "  - In Low Volatility regimes, it uses a specific sub-model (e.g., Ridge) optimized for steady trends.\n"
-                "  - In High Volatility regimes, it switches to a different sub-model (e.g., RandomForest) dealing with non-linear stress.\n"
-                f"Structure: {params if params else 'Default Configuration'}"
-            )
-        elif 'TrendGated' in model_type:
-            return (
-                f"Model Type: {model_type} (Trend Following Hybrid)\n"
-                "Mechanism: Dual-model architecture that switches based on Market Trend (Price vs 200MA).\n"
-                "  - BULL Regime (Price > 200MA): Uses 'Bull Model' (e.g., Ridge) to capture Momentum/Drift.\n"
-                "  - BEAR Regime (Price <= 200MA): Uses 'Bear Model' (e.g., XGBoost) to capture Panic/Reversion.\n"
-                "  - Logic: 'Don't fight the trend'. Use linear models when markets are behaving, non-linear when broken.\n"
-                f"Structure: {params if params else 'Bull=Ridge, Bear=XGBoost'}"
-            )
-        elif 'TFT' in model_type:
-            return (
-                f"Model Type: {model_type} (Temporal Fusion Transformer)\n"
-                "Mechanism: Advanced Deep Learning architecture for time-series forecasting.\n"
-                "  - Gating Mechanisms: Learns to suppress unnecessary features (Variable Selection Network).\n"
-                "  - LSTM Layers: Captures local time dependencies and sequence patterns.\n"
-                "  - Temporal Attention: Identifies long-range patterns and crucial past events.\n"
-                "  - Interpretability: Provides built-in feature importance and attention weights.\n"
-                f"Structure: {params if params else 'Hidden=64, Heads=4, Layers=2 (Default)'}"
-            )
-        elif 'LSTM' in model_type:
-            return (
-                f"Model Type: {model_type} (Long Short-Term Memory)\n"
-                "Mechanism: Recurrent Neural Network (RNN) designed to learn sequence dependencies.\n"
-                "  - Memory Cells: Can retain information over long periods, unlike standard feed-forward networks.\n"
-                "  - Non-Linearity: Capable of modeling complex, non-linear market dynamics.\n"
-                f"Structure: {params if params else 'Hidden=64, Layers=2 (Default)'}"
-            )
-        elif 'Ridge' in model_type or 'Linear' in model_type:
-            return (
-                f"Model Type: {model_type} (Regularized Linear Regression)\n"
-                "Mechanism: Linear approach that balances fit with complexity (L2 Regularization).\n"
-                "  - Pros: Highly robust to noise, less prone to overfitting than complex models.\n"
-                "  - Cons: Cannot model non-linear relationships.\n"
-                f"Structure: Alpha={params.get('alpha', 'Auto') if params else 'Auto'}"
-            )
-        elif 'Forest' in model_type or 'Tree' in model_type:
-             return (
-                f"Model Type: {model_type}\n"
-                "Mechanism: Ensemble of decision trees.\n"
-                "  - Non-Linear: Can model complex interactions between features.\n"
-                "  - Robustness: Averaging many trees reduces variance compared to a single tree.\n"
-                f"Structure: {params if params else 'Default Sklearn Config'}"
-            )
-        else:
-            return (
-                f"Model Type: {model_type}\n"
-                "Mechanism: Machine Learning Regressor.\n"
-                "  - Goal: Predict future returns based on historical patterns.\n"
-                f"Structure: {params if params else 'Standard Configuration'}"
-            )
-
-    model_desc_text = get_model_description(config.MODEL_TYPE, best_params)
-
-    # Define Report Context (Overview, Model, Validation, Strategy)
-    report_context = {
-        "1. Executive Summary": (
-            f"Analysis of {config.MODEL_TYPE} model predicting S&P 500 {config.TARGET_HORIZON_DAYS}-day returns.\n"
-            "This report evaluates the model's ability to forecast forward returns and the performance of trading strategies derived from those predictions."
-        ),
-        "2. Model Architecture": (
-            model_desc_text + "\n" +
-            f"Input Features: {len(feature_cols)} features selected for predictive power, including technicals, macro indicators, and sentiment."
-        ),
-        "3. Validation Methodology": (
-            "Technique: Strict Walk-Forward Validation (No Look-Ahead).\n"
-            "Why: To simulate real-world trading exactly as it would have happened.\n"
-            "Process:\n"
-            f"  1. Rolling Train Window: The model is trained on the past {config.TRAIN_WINDOW_YEARS} years of data.\n"
-            f"  2. Safety Embargo: A {config.EMBARGO_ROWS}-day gap is enforced between training and testing to prevent 'target leakage' (ensure we don't trade on data that wasn't public yet).\n"
-            f"  3. Out-of-Sample Test: The model predicts the NEXT month of unseen data.\n"
-            f"  4. Step Forward: The window rolls forward 1 month, and the process repeats ({total_folds} times).\n"
-            "Result: A composite track record of predictions made only on 'future' data."
-        ),
-        "Stack Decomposition": (
-             f"Ridge-Residual Correlation: {stack_metrics['correlation']:.4f}\n"
-             f"Var(Ridge): {stack_metrics['var_ridge']:.6f} | Var(Resid): {stack_metrics['var_resid']:.6f}\n"
-             f"Resid/Ridge Ratio: {stack_metrics['var_resid']/stack_metrics['var_ridge']:.2f}x\n"
-             "Analysis: Comparison of signal contribution from linear vs. residual components."
-        ) if stack_metrics else "N/A",
-        "4. Strategy Definitions": (
-            "A) Long/Short (Daily Overlap): \n"
-            "   - Concept: Enters a small portion (1/21) of the position every day based on the latest signal.\n"
-            "   - Effect: Smooths out timing luck. Effectively holds the average opinion of the model over the last month.\n"
-            "   - Result: Lower volatility, higher Sharpe potential due to time-diversification.\n\n"
-            "B) Long Only: \n"
-            "   - Concept: Same smoothing as above, but never shorts. If the model is bearish, it goes to Cash (0).\n\n"
-            "C) Vol Target 15%: \n"
-            "   - Concept: Institutional-style risk parity. \n"
-            "   - Logic: When market vol is low (10%), we lever up (1.5x) to target 15%. When market vol is high (30%), we size down (0.5x).\n"
-            "   - Goal: Stable returns regardless of market environment.\n\n"
-            "D) Big Move Sniper: \n"
-            "   - Concept: Only trades when the model predicts a massive move (>3%). Binary bet (All-in or Cash)."
-        ),
-        "5. Metrics Glossary": (
-            "Sharpe Ratio: Excess Return / Volatility. Measures return per unit of risk. >1.0 is Good, >2.0 is Exceptional.\n"
-            "Sortino Ratio: Like Sharpe, but ignores 'good' volatility (upside). Only penalizes downside risk.\n"
-            "CAGR: Compound Annual Growth Rate (Geometric). The actual annual growth rate of your capital.\n"
-            "Max Drawdown: Deepest peak-to-trough decline. A measure of 'pain'."
-        )
-    }
-
     engine = BacktestEngine(
-        predictions=all_preds, 
-        dates=test_dates, 
-        daily_returns=aligned_daily_rets, 
-        target_horizon=config.TARGET_HORIZON_DAYS,
-        feature_data=feature_data,
-        report_context=report_context
+        predictions=all_preds,
+        dates=test_dates,
+        daily_returns=aligned_daily_rets,
+        target_horizon=21
     )
     
-    # Generate comprehensive boss report (Excel)
-    boss_report_path = os.path.join(logger.run_dir, "boss_report.xlsx")
-    boss_sheets = engine.generate_boss_report_excel(save_path=boss_report_path)
+    boss_report = engine.generate_boss_report_md()
     
-    boss_report_path = os.path.join(logger.run_dir, "boss_report.xlsx")
-    boss_sheets = engine.generate_boss_report_excel(save_path=boss_report_path)
+    # 5. Append to Summary & Print
+    print(boss_report)
     
-    # Generate Plots
-    engine.generate_plots(logger.run_dir)
-    
-    # Generate comprehensive boss report (Markdown with Explanations)
-    boss_md = engine.generate_boss_report_md()
-    boss_md_path = os.path.join(logger.run_dir, "boss_report.md")
-    with open(boss_md_path, 'w', encoding='utf-8') as f:
-        f.write(boss_md)
-    print(f"✅ Boss Report Markdown (with explanations) saved to: {boss_md_path}")
-    
-    # Print summary to console
-    print("\n" + "="*80)
-    print("💼 BOSS REPORT SUMMARY")
-    print("="*80)
-    print(boss_sheets['Summary'].to_string(index=False))
-    print(f"\n✅ Full Boss Report saved to Excel with {len(boss_sheets)} sheets in: {logger.run_dir}")
-    print("   Sheets: Summary, Monthly Returns, Quarterly Returns, Rolling Metrics,")
-    print("          Regime Analysis, Trade Analysis, Period Sharpe")
-    
-    # Add brief note to summary.md instead of full report
     summary_path = os.path.join(logger.run_dir, "summary.md")
     with open(summary_path, 'a', encoding='utf-8') as f:
-        f.write("\n## 💼 Boss Report\n")
-        f.write("> **Detailed Strategy Report**: [View Boss Report (with Explanations)](boss_report.md)\n")
-        f.write("> Comprehensive trading strategy analysis also saved to `boss_report.xlsx`\n")
-        f.write("> \n")
-        f.write("> **Excel File Includes:**\n")
-        f.write("> - Summary: Core performance metrics for all strategies\n")
-        f.write("> - Monthly Returns: Month-by-month breakdown\n")
-        f.write("> - Quarterly Returns: Quarter-by-quarter breakdown\n")
-        f.write("> - Rolling Metrics: 6-month and 12-month rolling Sharpe ratios\n")
-        f.write("> - Regime Analysis: Performance in Low/High volatility regimes\n")
-        f.write("> - Trade Analysis: Trade-level statistics (holding periods, largest wins/losses)\n")
-        f.write("> - Period Sharpe: Annual and Quarterly Sharpe ratios\n")
-        f.write("> \n")
-        f.write("> Simulation includes 5bps transaction costs per turnover.\n\n")
+        f.write(boss_report)
     
-    print(f"\n✅ Summary note added to: {summary_path}")
-
-    # Return metrics for Benchmark Suite
-    return {
-        'model_type': config.MODEL_TYPE,
-        'boss_sheets': boss_sheets,
-        'metrics_test': metrics_test,
-        'metrics_val': metrics_val,
-        'tuned_policy_agg': tuned_policy_agg,
-        'regime_metrics': regime_metrics,
-        'fold_metrics_list': fold_metrics_list,
-        'stack_metrics': stack_metrics if 'stack_metrics' in locals() else None,
-        'signal_concentration': signal_concentration
-    }
+    print(f"\n✅ Boss Report appended to: {summary_path}")
 
 if __name__ == "__main__":
     import argparse

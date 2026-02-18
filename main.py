@@ -7,13 +7,13 @@ from ML import config
 from data_loader import fetch_data
 from features import cross_asset, macro, sentiment, trend, volatility, breadth
 
-def main():
+def main(save_to_mongodb=False):
     print("Starting Feature Engineering Pipeline...")
     
     # 1. Fetch Data
     # Fetch from 2008 to ensure we have enough history for rolling windows (200+ days)
     # so that data starting 2010-01-01 is fully populated.
-    df = fetch_data(start_date='2008-01-01')
+    df = fetch_data(start_date='2008-01-01', save_to_mongodb=save_to_mongodb)
     
     # Create a features DataFrame to hold new features
     # We can start with the index of the fetched data
@@ -134,9 +134,19 @@ def main():
     print(f"Saving to {output_path}...")
     features_df.to_csv(output_path)
 
+    # Persist features to MongoDB if requested
+    if save_to_mongodb:
+        try:
+            from db_helpers import upsert_features
+            upsert_features(features_df)
+        except Exception as e:
+            print(f"[MongoDB] Warning: Could not save features to MongoDB: {e}")
+
     print("First 5 rows:")
     print(features_df.head())
     print("Pipeline Complete.")
+
+    return features_df
 
 if __name__ == "__main__":
     main()

@@ -7,6 +7,12 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_PATH = os.path.join(REPO_ROOT, 'Output', 'final_features_with_target.csv')
 QUALITY_REPORT_PATH = os.path.join(REPO_ROOT, 'Output', 'data_quality_report.csv')
 
+# Data Source Toggle
+# "csv"     — load features from Output/final_features_with_target.csv (default, backward-compatible)
+# "mongodb" — load features from MongoDB Atlas (requires MONGODB_URI in .env)
+DATA_SOURCE = "csv"
+MONGODB_DB_NAME = "market_data"
+
 # ===============================
 # Feature Engineering Parameters (Data Rehab)
 # ===============================

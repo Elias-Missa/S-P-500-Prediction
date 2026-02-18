@@ -1,0 +1,37 @@
+Initialized all_detailed_predictions
+Fold 0: Appending 126 val preds.
+Fold 1: Appending 126 val preds.
+Fold 2: Appending 126 val preds.
+Fold 3: Appending 126 val preds.
+Fold 4: Appending 126 val preds.
+Fold 5: Appending 126 val preds.
+Fold 6: Appending 126 val preds.
+Fold 7: Appending 126 val preds.
+Fold 8: Appending 126 val preds.
+Fold 9: Appending 126 val preds.
+Fold 10: Appending 126 val preds.
+Fold 11: Appending 126 val preds.
+Fold 12: Appending 126 val preds.
+Fold 13: Appending 126 val preds.
+Fold 14: Appending 126 val preds.
+Fold 15: Appending 126 val preds.
+Fold 16: Appending 126 val preds.
+Fold 17: Appending 126 val preds.
+Fold 18: Appending 126 val preds.
+Fold 19: Appending 126 val preds.
+Fold 20: Appending 126 val preds.
+Fold 21: Appending 126 val preds.
+Fold 22: Appending 126 val preds.
+Fold 23: Appending 126 val preds.
+Fold 24: Appending 126 val preds.
+Fold 25: Appending 126 val preds.
+Fold 26: Appending 126 val preds.
+Fold 27: Appending 126 val preds.
+Fold 28: Appending 126 val preds.
+Fold 29: Appending 126 val preds.
+Fold 30: Appending 126 val preds.
+Fold 31: Appending 126 val preds.
+Fold 32: Appending 126 val preds.
+Fold 33: Appending 126 val preds.
+Finished Loop. Total items: 5014
+Entering Save Block

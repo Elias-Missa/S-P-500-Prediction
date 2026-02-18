@@ -388,6 +388,7 @@ def train_ensemble():
 | LSTM | {lstm_dir_acc*100:.2f}% | {lstm_valid.sum()} |
 | Transformer | {trans_dir_acc*100:.2f}% | {trans_valid.sum()} |
 
+
 ## Ensemble Performance
 - Directional Accuracy: {dir_acc*100:.2f}%
 - Information Coefficient: {ic:.4f}

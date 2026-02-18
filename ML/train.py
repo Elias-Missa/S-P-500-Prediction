@@ -1,9 +1,11 @@
 import pandas as pd
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 from ML import config, data_prep, models, utils, metrics, lstm_dataset, tuning, feature_selection
+from ML.backtest_engine import BacktestEngine
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
@@ -464,13 +466,25 @@ def main():
     
     # 5. Plot
     # Function to plot time series
+    # Function to plot time series (Matched to Walk-Forward Style)
     def plot_ts(y_true, y_pred, title, filename):
-        fig = plt.figure(figsize=(12, 6))
-        plt.plot(y_true.index, y_true, label='Actual', alpha=0.7)
-        plt.plot(y_true.index, y_pred, label='Predicted', alpha=0.7)
-        plt.title(title)
-        plt.legend()
-        plt.grid(True)
+        import matplotlib.dates as mdates
+        
+        fig = plt.figure(figsize=(24, 8))
+        plt.plot(y_true.index, y_true, label='Actual Return', alpha=0.5, color='gray')
+        plt.plot(y_true.index, y_pred, label='Predicted Return', alpha=0.8, color='#1f77b4')
+        plt.title(title, fontsize=14)
+        plt.ylabel("Return", fontsize=12)
+        plt.xlabel("Date", fontsize=12)
+        plt.legend(loc='upper left')
+        plt.grid(True, alpha=0.3)
+        
+        # Format X-axis to show every month
+        ax = plt.gca()
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        plt.xticks(rotation=45)
+        
         logger.save_plot(fig, filename)
         plt.close(fig)
 
@@ -501,12 +515,204 @@ def main():
         y_pred=y_test_pred_array,
         target_scaling_info=target_scaling_info
     )
+
+    # --- Save Detailed Predictions CSV ---
+    print("\n--- Saving Detailed Predictions CSV ---")
+    
+    # Collect Test Predictions
+    test_preds_df = pd.DataFrame({
+        'date': X_test.index,
+        'type': 'test',
+        'predicted': y_test_pred_array,
+        'actual': y_test_array
+    })
+    
+    # Collect Validation Predictions
+    y_val_array = y_val.values if hasattr(y_val, 'values') else np.array(y_val)
+    y_val_pred_array = np.array(y_val_pred)
+    
+    val_preds_df = pd.DataFrame({
+        'date': X_val.index,
+        'type': 'validation',
+        'predicted': y_val_pred_array,
+        'actual': y_val_array
+    })
+    
+    # Combine and Save
+    detailed_df = pd.concat([val_preds_df, test_preds_df], axis=0)
+    
+    # Ensure dates are datetime
+    detailed_df['date'] = pd.to_datetime(detailed_df['date'])
+    detailed_df = detailed_df.sort_values('date')
+    
+    csv_path = os.path.join(logger.run_dir, "predictions.csv")
+    detailed_df.to_csv(csv_path, index=False)
+    print(f"✅ Detailed predictions saved to: {csv_path}")
+
+    # --- MongoDB: Save predictions and run metadata ---
+    try:
+        import sys as _sys
+        _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from db_helpers import save_predictions as _save_preds
+        run_id = os.path.basename(logger.run_dir)
+        mongo_df = detailed_df.copy()
+        mongo_df = mongo_df.set_index('date')
+        mongo_df.rename(columns={'predicted': 'y_pred', 'actual': 'y_true'}, inplace=True)
+        run_meta = {
+            'model_type': config.MODEL_TYPE,
+            'process': 'Static',
+            'loss_mode': getattr(config, 'LOSS_MODE', 'mse'),
+            'test_start_date': str(config.TEST_START_DATE),
+            'n_features': len(feature_cols),
+            'test_rmse': float(test_results['rmse']),
+            'test_ic': float(test_results['ic']),
+            'test_dir_acc': float(test_results['dir_acc']),
+        }
+        _save_preds(run_id, mongo_df, run_meta)
+    except Exception as _e:
+        print(f"[MongoDB] Warning: Could not save predictions to MongoDB: {_e}")
+
+    # --- Boss Report Generation ---
+    print("\n--- Generating Boss Report ---")
+
+    # 1. Reload data to ensure we have the raw daily returns (Keep SPY_Price!)
+    # Train/Test logic uses processed data, but Report needs Raw Price for PnL
+    # This prevents "completely wrong" metrics due to scaled/transformed returns
+    try:
+        full_data_w_returns = data_prep.load_and_prep_data(keep_price=True)
+        
+        # 2. Ensure 'Return_1D' exists (Calculated from Price if missing)
+        if 'Return_1D' not in full_data_w_returns.columns:
+            if 'Adj Close' in full_data_w_returns.columns:
+                full_data_w_returns['Return_1D'] = full_data_w_returns['Adj Close'].pct_change()
+            elif 'SPY_Price' in full_data_w_returns.columns:
+                print("Note: Using 'SPY_Price' to calculate daily returns.")
+                full_data_w_returns['Return_1D'] = full_data_w_returns['SPY_Price'].pct_change()
+            else:
+                 print("Warning: Price data not found, using existing returns if available.")
+                 full_data_w_returns['Return_1D'] = full_data_w_returns.get('Return_1D', 0.0)
+
+        # 3. Align dates and returns
+        # X_test.index contains the exact dates we predicted on
+        aligned_daily_rets = full_data_w_returns.loc[X_test.index, 'Return_1D']
+        
+        # Get feature data for regime analysis (if available)
+        feature_data = None
+        if 'RV_Ratio' in full_data_w_returns.columns:
+            feature_data = full_data_w_returns[['RV_Ratio']].loc[X_test.index]
+        else:
+            feature_data = X_test # Fallback to using test set features if raw reload fails to align or missing cols
+            
+    except Exception as e:
+        print(f"Warning: Failed to reload raw data for report ({e}). Falling back to training dataframe.")
+        if 'Return_1D' not in df.columns:
+            df['Return_1D'] = df['SPY_Price'].pct_change() if 'SPY_Price' in df.columns else 0.0
+        aligned_daily_rets = df.loc[X_test.index, 'Return_1D']
+        feature_data = X_test
+
+    # 4. Dynamic Model Description Helper (Copied from Walk-Forward for consistency)
+    def get_model_description(model_type, params):
+        if 'Regime' in model_type:
+            return (
+                f"Model Type: {model_type}\n"
+                "Mechanism: 'Regime Gated' architecture.\n"
+                f"Structure: {params if params else 'Default Configuration'}"
+            )
+        elif 'Ridge' in model_type or 'Linear' in model_type:
+            return (
+                f"Model Type: {model_type} (Regularized Linear Regression)\n"
+                "Mechanism: Linear approach that balances fit with complexity (L2 Regularization).\n"
+                "  - Pros: Highly robust to noise, less prone to overfitting.\n"
+                f"Structure: Alpha={params.get('alpha', 'Auto') if params else 'Auto'}"
+            )
+        else:
+            return (
+                f"Model Type: {model_type}\n"
+                f"Structure: {params if params else 'Standard Configuration'}"
+            )
+
+    model_desc_text = get_model_description(config.MODEL_TYPE, best_params)
+
+    # 5. Report Context
+    report_context = {
+        "1. Executive Summary": (
+            f"Static Analysis of {config.MODEL_TYPE} model.\n"
+            f"Trained on {config.TRAIN_WINDOW_YEARS} years history (until 2022), tested on 2023-Present."
+        ),
+        "2. Model Architecture": model_desc_text,
+        "3. Validation Methodology": (
+            "Static Split Validation.\n"
+            "The model is trained ONCE on historical data and tested on a subsequent unseen period.\n"
+            "This tests the model's ability to generalize over time without retraining (Strict OOS)."
+        ),
+        "4. Strategy Definitions": (
+            "A) Long/Short (Daily Overlap): Enters 1/21 position daily. Smooths timing luck.\n"
+            "B) Long Only: Same as L/S but no shorting (Cash instead).\n"
+            "C) Vol Target 15%: Adjusts leverage to target 15% annualized volatility.\n"
+            "D) Big Move Sniper: Only trades when prediction > 3% (Binary)."
+        ),
+        "5. Metrics Glossary": (
+            "Sharpe Ratio: Excess Return / Volatility (>1.0 Good).\n"
+            "Max Drawdown: Deepest peak-to-trough decline.\n"
+            "CAGR: Compound Annual Growth Rate."
+        )
+    }
+
+    # 6. Instantiate Engine
+    try:
+        # Calculate validation stats (using helper directly)
+        val_stats = metrics.calculate_classification_stats(y_val, y_val_pred)
+        # Simplify validation stats for passing (or pass all)
+        # We'll pass the whole dict, BacktestEngine will handle it.
+        
+        engine = BacktestEngine(
+            predictions=y_test_pred_array, 
+            dates=X_test.index, 
+            daily_returns=aligned_daily_rets, 
+            target_horizon=config.TARGET_HORIZON_DAYS,
+            feature_data=feature_data,
+            report_context=report_context,
+            validation_metrics=val_stats,
+            actual_targets=y_test_array
+        )
+        
+        # 7. Generate and Save
+        engine.generate_boss_report_excel(save_path=os.path.join(logger.run_dir, "boss_report.xlsx"))
+        boss_md = engine.generate_boss_report_md()
+        with open(os.path.join(logger.run_dir, "boss_report.md"), 'w', encoding='utf-8') as f:
+            f.write(boss_md)
+        
+        engine.generate_plots(logger.run_dir)
+        print(f"✅ Boss Report saved to: {logger.run_dir}")
+        
+    except Exception as e:
+        print(f"❌ Failed to generate Boss Report: {e}")
     
     # Feature Importance (if available)
     if hasattr(model, 'feature_importances_'):
         importances = pd.Series(model.feature_importances_, index=feature_cols)
         print("\nTop 10 Features:")
         print(importances.sort_values(ascending=False).head(10))
+        
+        # Save CSV
+        fi_df = pd.DataFrame({'Feature': feature_cols, 'Importance': model.feature_importances_})
+        fi_df = fi_df.sort_values('Importance', ascending=False)
+        fi_df.to_csv(os.path.join(logger.run_dir, "feature_importance.csv"), index=False)
+        
+        # Save Plot
+        try:
+            top_n = 20
+            plot_df = fi_df.head(top_n).iloc[::-1]
+            fig_fi = plt.figure(figsize=(12, 10))
+            plt.barh(plot_df['Feature'], plot_df['Importance'], color='#1f77b4')
+            plt.title(f"Top {top_n} Feature Importance ({config.MODEL_TYPE})", fontsize=14)
+            plt.xlabel("Importance Score")
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            logger.save_plot(fig_fi, filename="feature_importance.png")
+            print("✅ Feature importance saved to CSV and PNG.")
+        except Exception as e:
+            print(f"Failed to plot feature importance: {e}")
 
 if __name__ == "__main__":
     import argparse

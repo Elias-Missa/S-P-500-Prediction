@@ -3,3 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Environment variables (credentials — never commit)
+.env
+
+# Refresh logs
+logs/

@@ -18,26 +18,41 @@ from .utils import validate_trading_calendar
 from .feature_rehab import rehab_features
 
 
-def build_daily_features(data_path=None):
+def build_daily_features(data_path=None, data_source=None):
     """
     Load and clean daily features from the feature pipeline output.
     
-    - Loads data from CSV
+    - Loads data from CSV or MongoDB (controlled by data_source or config.DATA_SOURCE)
     - No backward-fill allowed
     - Drops warmup rows with NaNs
     - Returns clean daily feature DataFrame with SPY_Price preserved for target creation
     
     Args:
-        data_path: Path to feature CSV (defaults to config.DATA_PATH)
+        data_path: Path to feature CSV (defaults to config.DATA_PATH). Ignored when data_source="mongodb".
+        data_source: "csv" or "mongodb" (defaults to config.DATA_SOURCE)
         
     Returns:
         df_daily: DataFrame with daily features, index is DatetimeIndex
         price_series: SPY_Price series for target creation
     """
-    data_path = data_path or config.DATA_PATH
-    
-    print(f"[DatasetBuilder] Loading daily features from {data_path}...")
-    df = pd.read_csv(data_path, index_col=0, parse_dates=True)
+    data_source = data_source or getattr(config, "DATA_SOURCE", "csv")
+
+    if data_source == "mongodb":
+        import sys, os
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from db_helpers import load_features_df
+        print("[DatasetBuilder] Loading daily features from MongoDB...")
+        df = load_features_df()
+        if df.empty:
+            raise RuntimeError(
+                "No features found in MongoDB. Run the feature pipeline with "
+                "save_to_mongodb=True first, or switch DATA_SOURCE to 'csv'."
+            )
+    else:
+        data_path = data_path or config.DATA_PATH
+        print(f"[DatasetBuilder] Loading daily features from {data_path}...")
+        df = pd.read_csv(data_path, index_col=0, parse_dates=True)
+
     df.sort_index(inplace=True)
     
     # Filter out weekends explicitly

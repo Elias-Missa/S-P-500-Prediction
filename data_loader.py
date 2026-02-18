@@ -42,13 +42,17 @@ def _export_quality_report(df):
     report.to_csv(os.path.join(OUTPUT_DIR, 'data_quality_report.csv'))
 
 
-def fetch_data(start_date='2010-01-01'):
+def fetch_data(start_date='2010-01-01', save_to_mongodb=False):
     """
     Fetches and aligns data from multiple sources (yfinance, FRED).
     
     Sources:
     - yfinance: SPY, ^VIX, CL=F, DX-Y.NYB, HYG, SHY, ^CPC, ^NYA50
     - FRED: T10Y2Y, ISM_PMI (NAPM or PMI fallback), UMICH_SENT
+    
+    Args:
+        start_date: Earliest date to fetch (default '2010-01-01').
+        save_to_mongodb: If True, upsert raw data to MongoDB after fetch.
     
     Returns:
         pd.DataFrame: Merged DataFrame with daily DatetimeIndex (forward-filled).
@@ -282,6 +286,14 @@ def fetch_data(start_date='2010-01-01'):
     print("Shape:", full_df.shape)
     print("FRED Sources used:", fred_sources)
     print("Non-trading days removed: (Implicitly handled by reindex to SPY)")
+
+    # Persist to MongoDB if requested
+    if save_to_mongodb:
+        try:
+            from db_helpers import upsert_ohlcv
+            upsert_ohlcv(full_df)
+        except Exception as e:
+            print(f"[MongoDB] Warning: Could not save OHLCV to MongoDB: {e}")
 
     return full_df
 

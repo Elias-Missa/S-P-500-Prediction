@@ -230,6 +230,85 @@ def calculate_hit_rate(y_true, y_pred):
     return np.mean(correct)
 
 
+def calculate_classification_stats(y_true, y_pred):
+    """
+    Calculates comprehensive classification metrics for directional prediction.
+    
+    Args:
+        y_true: Actual returns
+        y_pred: Predicted returns
+        
+    Returns:
+        Dictionary with Accuracy, Precision, Recall, F1, and Confusion Matrix raw counts.
+    """
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    
+    # Filter NaNs
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true = y_true[mask]
+    y_pred = y_pred[mask]
+    
+    # Convert to signs (-1, 1). Ignore 0s for simplicity or treat as neutral.
+    # We'll treat > 0 as Positive (1) and <= 0 as Negative (0) for standard binary classification
+    # But usually in finance, 0 is rare. Let's use > 0 and < 0.
+    
+    true_sign = np.sign(y_true)
+    pred_sign = np.sign(y_pred)
+    
+    # We only consider non-zero actuals for evaluation usually, but here we cover all.
+    # Positives: > 0
+    # Negatives: <= 0 (Treat 0 as negative/neutral)
+    
+    y_true_bin = (true_sign > 0).astype(int)
+    y_pred_bin = (pred_sign > 0).astype(int)
+    
+    # Calculation
+    # TP: Pred=1, True=1
+    # FP: Pred=1, True=0
+    # TN: Pred=0, True=0
+    # FN: Pred=0, True=1
+    
+    TP = np.sum((y_pred_bin == 1) & (y_true_bin == 1))
+    FP = np.sum((y_pred_bin == 1) & (y_true_bin == 0))
+    TN = np.sum((y_pred_bin == 0) & (y_true_bin == 0))
+    FN = np.sum((y_pred_bin == 0) & (y_true_bin == 1))
+    
+    total = len(y_true_bin)
+    
+    accuracy = (TP + TN) / total if total > 0 else 0.0
+    
+    # Precision (Positive): TP / (TP + FP)
+    precision_pos = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+    
+    # Recall (Positive): TP / (TP + FN)
+    recall_pos = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+    
+    # Precision (Negative): TN / (TN + FN)
+    precision_neg = TN / (TN + FN) if (TN + FN) > 0 else 0.0
+    
+    # Recall (Negative): TN / (TN + FP)
+    recall_neg = TN / (TN + FP) if (TN + FP) > 0 else 0.0
+    
+    f1_pos = 2 * (precision_pos * recall_pos) / (precision_pos + recall_pos) if (precision_pos + recall_pos) > 0 else 0.0
+    
+    return {
+        'Accuracy': accuracy,
+        'Precision (Up)': precision_pos,
+        'Recall (Up)': recall_pos,
+        'F1 Score (Up)': f1_pos,
+        'Precision (Down)': precision_neg,
+        'Recall (Down)': recall_neg,
+        'True Positives (TP)': int(TP),
+        'False Positives (FP)': int(FP),
+        'True Negatives (TN)': int(TN),
+        'False Negatives (FN)': int(FN),
+        'Total Up Preds': int(TP + FP),
+        'Total Down Preds': int(TN + FN),
+        'Total Samples': int(total)
+    }
+
+
 def calculate_decile_spread(y_true, y_pred):
     """
     Calculates the decile spread: difference in mean actual return

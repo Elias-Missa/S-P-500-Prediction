@@ -4,3 +4,5 @@ numpy
 scipy
 arch
 pandas_datareader
+pymongo[srv]
+python-dotenv
